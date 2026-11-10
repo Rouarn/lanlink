@@ -14,7 +14,13 @@ pub struct Settings {
     /// 短码远端解析服务地址（默认内置，可改成自己的服务）
     #[serde(default)]
     pub resolver_base_url: Option<String>,
+    /// 设置结构版本：旧文件里没有这个字段（0），迁移一次后就固定为当前版本。
+    #[serde(default)]
+    pub version: u32,
 }
+
+/// 当前设置结构版本。历史残留清理只做一次，之后用户手动填的地址不再被删。
+pub const SETTINGS_VERSION: u32 = 1;
 
 const SCHEMES: [&str; 6] = ["tcp://", "udp://", "ws://", "wss://", "quic://", "wg://"];
 
@@ -41,6 +47,15 @@ const LEGACY_RESOLVER_BASE_URLS: &[&str] = &["https://lanlink.example.com/api/la
 const LEGACY_DEFAULT_RELAYS: &[&str] = &["tcp://150.158.128.228:11010"];
 
 impl Settings {
+    /// 新建并保存时统一带上当前版本，避免迁移逻辑重复执行。
+    pub fn new(relays: Vec<String>, resolver_base_url: Option<String>) -> Settings {
+        Settings {
+            relays,
+            resolver_base_url,
+            version: SETTINGS_VERSION,
+        }
+    }
+
     pub fn load() -> Settings {
         let mut settings: Settings = match path() {
             Some(path) => fs::read_to_string(path)
@@ -49,17 +64,7 @@ impl Settings {
                 .unwrap_or_default(),
             None => Settings::default(),
         };
-        let mut dirty = false;
-        // 升级迁移：把旧版本自动塞进去的默认中继当成「未配置」清掉
-        let before = settings.relays.len();
-        settings.relays.retain(|relay| {
-            !LEGACY_DEFAULT_RELAYS
-                .iter()
-                .any(|legacy| legacy.eq_ignore_ascii_case(relay.trim()))
-        });
-        if settings.relays.len() != before {
-            dirty = true;
-        }
+        let mut dirty = migrate(&mut settings);
         // 解析服务地址：旧占位地址统一迁移；没存过（或存成空）时用内置默认值，全新安装无需手填
         let stored = settings.resolver_base_url.as_deref().map(str::trim);
         let stale = stored.is_some_and(|value| {
@@ -89,11 +94,32 @@ impl Settings {
         if let Some(dir) = path.parent() {
             fs::create_dir_all(dir).map_err(|err| format!("无法创建设置目录：{err}"))?;
         }
-        let json = serde_json::to_string_pretty(self).map_err(|err| format!("序列化设置失败：{err}"))?;
+        let mut current = self.clone();
+        // 落盘时始终标记为已迁移，避免下次启动又把用户填的中继当成历史残留清掉
+        current.version = current.version.max(SETTINGS_VERSION);
+        let json = serde_json::to_string_pretty(&current)
+            .map_err(|err| format!("序列化设置失败：{err}"))?;
         fs::write(&path, json).map_err(|err| format!("写入设置失败：{err}"))?;
         crate::config::hand_back(&path);
         Ok(())
     }
+}
+
+/// 一次性升级迁移：清掉旧版本自动写入的默认中继，并把版本号抬到当前值。
+///
+/// 返回是否需要回写文件。已经是当前版本的设置不做任何改动——
+/// 否则用户手动填写的同一地址会在每次启动时被删掉。
+fn migrate(settings: &mut Settings) -> bool {
+    if settings.version >= SETTINGS_VERSION {
+        return false;
+    }
+    settings.relays.retain(|relay| {
+        !LEGACY_DEFAULT_RELAYS
+            .iter()
+            .any(|legacy| legacy.eq_ignore_ascii_case(relay.trim()))
+    });
+    settings.version = SETTINGS_VERSION;
+    true
 }
 
 /// 解析服务地址：空值（含未存过、只有空白）回落到内置默认地址。
@@ -174,7 +200,10 @@ fn path() -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_relays, resolver_or_default, DEFAULT_RESOLVER_BASE_URL};
+    use super::{
+        migrate, normalize_relays, resolver_or_default, Settings, DEFAULT_RESOLVER_BASE_URL,
+        SETTINGS_VERSION,
+    };
 
     #[test]
     fn resolver_falls_back_to_builtin_default() {
@@ -188,6 +217,23 @@ mod tests {
             resolver_or_default(Some(" https://my.host/api/lanlink ")),
             "https://my.host/api/lanlink"
         );
+    }
+
+    #[test]
+    fn legacy_relay_is_only_cleared_once() {
+        let mut legacy = Settings {
+            relays: vec!["tcp://150.158.128.228:11010".to_string()],
+            resolver_base_url: None,
+            version: 0,
+        };
+        assert!(migrate(&mut legacy));
+        assert!(legacy.relays.is_empty(), "旧版本自动写入的默认中继应被清掉");
+        assert_eq!(legacy.version, SETTINGS_VERSION);
+
+        // 同一个地址由用户手动填写，版本已是最新，必须保留
+        let mut saved = Settings::new(vec!["tcp://150.158.128.228:11010".to_string()], None);
+        assert!(!migrate(&mut saved));
+        assert_eq!(saved.relays, vec!["tcp://150.158.128.228:11010"]);
     }
 
     #[test]

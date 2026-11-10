@@ -14,23 +14,24 @@ macOS 上 Tauri 应用不能用 `sudo`，只能用 Authorization Services：
 - 启动后紧接着 `AuthorizationFree(auth_ref, kAuthorizationFlagDestroyRights)`
   立即销毁这次授权（见 `macos.rs`），不会留下可复用的凭证。
 
-## 二、进程模型（当前实现）
+## 二、进程模型（当前实现：启动即提权）
 
-点「连接」后：
+主窗口出现之前就解决权限（`lib.rs` 的 `elevate_at_launch`）：
 
-1. 用户态实例把待连接参数（房间码、主机名、数据目录、原用户 uid:gid）拼成命令行；
-2. 释放单实例锁（`/tmp/lanlink-instance.lock` 的 flock），让提权实例能拿到；
-3. 后台线程调用 `relaunch_as_root`，另起一个线程轮询 `/tmp/lanlink-instance.pid`；
-4. root 实例拿到锁并把 pid 写进 pid 文件后，用户态实例检测到「已有继任者」，
-   等 150ms 干净退出（不留在 Dock、不留后台）；
-5. root 实例接管界面，接管后启动 core，全局只有一份 core。
+1. 启动时先看 `geteuid()`；已经是 root（或带 `--elevated-run`）就继续正常起界面；
+2. 不是 root：`relaunch_as_root` 立刻请求管理员授权，带上
+   `--elevated-run --data-dir <用户数据目录> --owner <uid:gid>` 以 root 重开自己；
+3. 拉起成功后当前进程**立即退出**，不会先显示一个普通权限窗口；
+4. 用户点「取消」/授权失败：`osascript` 弹窗说明「没有管理员权限无法创建虚拟网卡」，随即退出。
 
-失败路径：如果 120s 内没有继任者（用户取消授权 / 授权失败），用户态实例重新拿回锁，
-把错误写进 `ELEVATE_ERROR`，前端刷新状态时展示出来。
+因此不存在「没权限的窗口先用一半、再重开一个有权限的」这条路径；
+普通权限进程在创建任何窗口（NSApplication）之前就退出了，**不会产生 Dock 图标**，
+系统里始终只有一个界面进程、一个 Dock 图标。
 
 ### 只有一个 Dock 图标与一个 core
 
-- 选的是「提权实例接管界面、原实例退出」，不是两个窗口并存；
+- 提权发生的时机提前到窗口创建之前，用户态进程从不进入 Dock，
+  不会出现「两个 LanLink 图标、其中一个没有运行小圆点」；
 - 单实例锁保证任何时候只有一个 App 进程持有锁，第二个实例启动后发现锁被占就直接 `return`；
 - core 的 pid 写在 `/tmp/lanlink/core.pid`，连新 core 前会先回收 15888 与 11010-11013
   上的旧 core 进程，避免「两个 core 抢同一份 peer id」。
@@ -41,24 +42,24 @@ root 的 `$HOME` 是 `/var/root`，直接读默认路径会读不到用户自己
 所以提权时显式传：
 
 ```text
---elevated-run --room <code> --hostname <name> --data-dir <用户数据目录> --owner <uid:gid>
+--elevated-run --data-dir <用户数据目录> --owner <uid:gid>
 ```
 
 写回文件后再把属主 `chown` 回原用户（`config::hand_back`），避免用户态下次启动读不了自己的配置。
 日志文件同理：core 以 root 创建 `/tmp/lanlink/core.log` 后会 chmod 666 并交还属主，
 否则普通用户点「清空日志」会因为没写权限而失败。
 
-## 三、为什么每次连接都要输密码
+## 三、为什么每次启动都要输密码
 
 `AuthorizationExecuteWithPrivileges` 需要一个 `AuthorizationRef`：
 
-- 我们每次连接都在**新进程**里新建 AuthorizationRef，用完立即 `DestroyRights`；
+- 我们每次启动都在**新进程**里新建 AuthorizationRef，用完立即 `DestroyRights`；
 - 系统对「获得 root 权利」的授权默认只缓存约 5 分钟（`kAuthorizationFlagDefaults` 的 right 缓存），
   且以 `security_authtrampoline` 拉起子进程后，凭证不跨进程继承；
-- 因此：5 分钟内连续连接不会再问密码；超过这个窗口、或重启过 App，就会重新弹框。
+- 因此：5 分钟内反复启动不会再问密码；超过这个窗口、或重启过电脑，就会重新弹框。
   这是系统行为，不是 LanLink 故意每次索要。
 
-实测：授权过一次后 5 分钟内反复连接不弹框；等到凭证过期再连，密码框会重新出现。
+实测：授权过一次后 5 分钟内反复启动不弹框；等到凭证过期再启动，密码框会重新出现。
 
 ## 四、能不能复用授权 / 换常驻 helper
 

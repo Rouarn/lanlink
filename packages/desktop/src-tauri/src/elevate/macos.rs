@@ -16,6 +16,16 @@ use security_framework_sys::authorization::{
     AuthorizationCreate, AuthorizationExecuteWithPrivileges, AuthorizationFree, AuthorizationRef,
 };
 
+/// 启动阶段还没有任何窗口，授权被取消 / 失败时用系统弹窗把原因说清楚，再退出。
+pub fn show_fatal_alert(message: &str) {
+    let text = message.replace('\\', "\\\\").replace('"', "\\\"").replace(['\n', '\r'], " ");
+    let script = format!("display alert \"LanLink 无法启动\" message \"{text}\" as critical");
+    let _ = std::process::Command::new("osascript")
+        .arg("-e")
+        .arg(script)
+        .status();
+}
+
 pub fn relaunch_as_root(extra_args: &[String]) -> Result<(), String> {
     let exe = std::env::current_exe().map_err(|e| format!("无法定位可执行文件：{e}"))?;
     let exe = CString::new(exe.as_os_str().as_bytes())

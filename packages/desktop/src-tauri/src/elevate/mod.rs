@@ -29,6 +29,12 @@ pub fn relaunch_as_root(extra_args: &[String]) -> Result<(), String> {
     macos::relaunch_as_root(extra_args)
 }
 
+/// 启动阶段授权失败时的系统弹窗（此时还没有主窗口）。
+#[cfg(target_os = "macos")]
+pub fn show_fatal_alert(message: &str) {
+    macos::show_fatal_alert(message)
+}
+
 #[cfg(windows)]
 pub fn relaunch_as_root(extra_args: &[String]) -> Result<(), String> {
     windows::relaunch_as_root(extra_args)

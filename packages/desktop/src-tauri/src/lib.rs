@@ -76,10 +76,7 @@ fn save_settings(relays: String, resolver_base_url: Option<String>) -> Result<Se
         .map(|url| url.trim().to_string())
         .filter(|url| !url.is_empty())
         .map(|url| url.trim_end_matches('/').to_string());
-    let settings = Settings {
-        relays,
-        resolver_base_url,
-    };
+    let settings = Settings::new(relays, resolver_base_url);
     settings.save()?;
     Ok(settings)
 }
@@ -262,6 +259,54 @@ fn default_hostname() -> String {
     format!("lanlink-{:04x}", nanos % 0xffff)
 }
 
+/// macOS：启动即提权。
+///
+/// 在创建任何窗口之前判断权限：不是 root 就立刻请求管理员授权并用 root 重开自己，
+/// 当前进程随即退出；授权被取消或失败则明确告知原因后退出，不进入「无权限也能用一半」的状态。
+#[cfg(target_os = "macos")]
+fn elevate_at_launch(args: &[String]) {
+    if args.iter().any(|arg| arg == "--elevated-run") || elevate::is_elevated() {
+        return;
+    }
+
+    // 已经有实例在跑（root 实例持有 /tmp 下的锁）：不再重复索要授权
+    if single::acquire().is_err() {
+        return;
+    }
+    // 马上要拉起 root 实例，锁必须先放掉，否则它会把自己当成第二个实例而退出
+    single::release();
+
+    let mut extra = vec![
+        "--elevated-run".to_string(),
+        "--data-dir".to_string(),
+        config::data_dir().display().to_string(),
+        "--owner".to_string(),
+        // root 实例没有用户的 HOME，必须显式带上数据目录与文件属主
+        format!("{}:{}", unsafe { libc::getuid() }, unsafe { libc::getgid() }),
+    ];
+    // 兼容从命令行带进来的连接参数（正常情况下启动时没有这些）
+    for name in ["--room", "--hostname"] {
+        if let Some(value) = args
+            .windows(2)
+            .find(|pair| pair[0] == name)
+            .map(|pair| pair[1].clone())
+        {
+            extra.push(name.to_string());
+            extra.push(value);
+        }
+    }
+
+    match elevate::relaunch_as_root(&extra) {
+        Ok(()) => std::process::exit(0),
+        Err(err) => {
+            elevate::show_fatal_alert(&format!(
+                "LanLink 需要管理员权限才能创建虚拟网卡，没有权限无法启动。{err}"
+            ));
+            std::process::exit(1);
+        }
+    }
+}
+
 pub fn run() {
     let args: Vec<String> = std::env::args().collect();
     let arg_value = |name: &str| {
@@ -279,6 +324,10 @@ pub fn run() {
         config::set_override(std::path::PathBuf::from(dir), owner);
     }
 
+    // macOS：主窗口出现之前先解决权限，任何时刻系统里只有一个界面进程
+    #[cfg(target_os = "macos")]
+    elevate_at_launch(&args);
+
     // 单实例：只允许一个界面进程（提权后的管理员实例会接着持有这把锁）
     if let Err(err) = single::acquire() {
         eprintln!("{err}，本次启动直接退出");
@@ -286,7 +335,6 @@ pub fn run() {
     }
 
     let elevated_run = args.iter().any(|arg| arg == "--elevated-run");
-    let connect_on_launch = args.iter().any(|arg| arg == "--connect");
     let hostname = args
         .windows(2)
         .find(|pair| pair[0] == "--hostname")
@@ -325,23 +373,19 @@ pub fn run() {
                 }
             }
 
-            if !elevated_run && !connect_on_launch {
+            // 只有带了 --room 的启动才自动连接（正常启动没有）
+            let Some(room_code) = room_code.clone() else {
                 return Ok(());
-            }
+            };
 
             let handle = app.handle().clone();
             let hostname = hostname.clone();
-            let room_code = room_code.clone();
             // 等窗口创建完成后再连，便于前端立即看到「连接中」状态
             std::thread::spawn(move || {
                 std::thread::sleep(Duration::from_millis(600));
                 let settings = Settings::load();
-                let Some(code) = room_code else {
-                    eprintln!("缺少 --room 参数，跳过自动连接");
-                    return;
-                };
                 match rooms::lookup(
-                    &code,
+                    &room_code,
                     settings.relays,
                     settings.resolver_base_url,
                     resolver_token(),
