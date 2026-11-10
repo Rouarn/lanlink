@@ -177,10 +177,50 @@ jobs:
           Move-Item $src.FullName $name
           Get-Item $name | Format-List Name, Length
 
+      - name: Package Windows portable zip
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          # 绿色版直接取 build 产物（--bundles nsis 也会在 target/release 下生成主程序），
+          # 比从安装包里反解干净，也不会带进 uninstall.exe / 安装脚本。
+          # 程序在运行期用 current_exe 定位 core 与创建计划任务，不读取安装器写的东西，
+          # 所以「exe + core\windows-x64」就能双击运行。
+          $stage = Join-Path $env:RUNNER_TEMP "portable/LanLink"
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          $exe = "packages/desktop/src-tauri/target/${{ matrix.target }}/release/lanlink.exe"
+          if (-not (Test-Path $exe)) { throw "未找到构建产物 $exe" }
+          Copy-Item $exe (Join-Path $stage "LanLink.exe")
+          Copy-Item "packages/core/windows-x64" (Join-Path $stage "core/windows-x64") -Recurse
+          Remove-Item (Join-Path $stage "core/windows-x64/.gitkeep") -ErrorAction SilentlyContinue
+          # 便携包绝不带内核驱动：.sys 会被杀软拦，且 LanLink 没启用 EasyTier 的广播抓包。
+          if (Test-Path (Join-Path $stage "core/windows-x64/WinDivert64.sys")) {
+            throw "便携包不得包含 WinDivert64.sys"
+          }
+          foreach ($f in @("LanLink.exe", "core/windows-x64/easytier-core.exe", "core/windows-x64/easytier-cli.exe", "core/windows-x64/Packet.dll", "core/windows-x64/wintun.dll")) {
+            if (-not (Test-Path (Join-Path $stage $f))) { throw "便携包缺少 $f" }
+          }
+          Get-ChildItem -Recurse $stage | Format-Table FullName, Length
+          $zip = "LanLink-$env:VERSION-windows-x64-portable.zip"
+          # -Path 传目录：压缩后顶层是单个 LanLink 目录，解压不会把文件散到当前目录。
+          Compress-Archive -Path $stage -DestinationPath $zip -CompressionLevel Optimal
+          Get-Item $zip | Format-List Name, Length
+
       - name: Upload installer
         uses: actions/upload-artifact@v4
         with:
           name: LanLink-${{ steps.version.outputs.version }}-${{ matrix.suffix }}
           path: LanLink-${{ steps.version.outputs.version }}-${{ matrix.suffix }}
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload Windows portable
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: LanLink-${{ steps.version.outputs.version }}-windows-x64-portable
+          path: LanLink-${{ steps.version.outputs.version }}-windows-x64-portable.zip
           if-no-files-found: error
           retention-days: 14
