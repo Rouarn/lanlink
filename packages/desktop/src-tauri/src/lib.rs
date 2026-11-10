@@ -167,7 +167,7 @@ fn request_connect(
         let name = hostname
             .filter(|name| !name.trim().is_empty())
             .unwrap_or_else(default_hostname);
-        let args = vec![
+        let mut args = vec![
             "--elevated-run".to_string(),
             "--room".to_string(),
             room.code.clone(),
@@ -176,9 +176,12 @@ fn request_connect(
             // root 实例没有用户的 HOME，必须显式带上数据目录与文件属主
             "--data-dir".to_string(),
             config::data_dir().display().to_string(),
+        ];
+        #[cfg(unix)]
+        args.extend([
             "--owner".to_string(),
             format!("{}:{}", unsafe { libc::getuid() }, unsafe { libc::getgid() }),
-        ];
+        ]);
 
         // 交棒：先把实例锁放掉，否则管理员实例会把自己当成第二个实例而退出
         single::release();
