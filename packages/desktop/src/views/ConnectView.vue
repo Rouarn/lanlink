@@ -11,7 +11,7 @@ import { activeTab, busy, message } from "../stores/app";
 
 const { room, recent, preview, activeRoom, resetActiveRoom } = useRooms();
 const { configured, resolverUrl } = useSettings();
-const { status, state, running, pending, connect, disconnect } = useTunnel();
+const { status, state, connect, disconnect } = useTunnel();
 
 /** 断开连接：停 core、回到未连接；最近房间记录保留。 */
 async function handleDisconnect(): Promise<void> {
@@ -59,7 +59,4 @@ async function handleDisconnect(): Promise<void> {
   </BannerNotice>
 
   <p v-if="message" class="footnote">{{ message }}</p>
-  <p v-if="!running && state !== 'failed'" class="footnote">
-    首次连接会请求管理员授权：macOS 创建虚拟网卡需要 root 权限。
-  </p>
 </template>

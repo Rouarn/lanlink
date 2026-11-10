@@ -75,10 +75,11 @@ pnpm install
 
 ## 说明
 
-- EasyTier 创建 TUN 网卡需要管理员权限。首次点「连接」会弹系统授权框，
-  授权后应用以管理员身份重新启动并自动连接（与官方 GUI 相同做法）：
-  macOS 用 `AuthorizationExecuteWithPrivileges`，Windows 用 `ShellExecuteExW` + `runas`
-  （UAC 点「否」会提示「你取消了管理员授权，本次未连接」，原窗口继续可用）。
+- EasyTier 创建 TUN 网卡需要管理员权限。
+  macOS：启动即提权——打开应用就请求管理员授权，以 root 重开并接管界面，
+  拒绝授权会提示原因后直接退出（macOS 用 `AuthorizationExecuteWithPrivileges`）。
+  Windows：仍是点击「连接」时才用 `ShellExecuteExW` + `runas` 提权，
+  UAC 点「否」会提示「你取消了管理员授权，本次未连接」，原窗口继续可用。
 - 中继服务器在「设置 → 运行环境」里由用户自己填写，程序不内置任何默认地址；
   未填写时创建/加入不可用。网络名、密钥随房间生成，不在代码里写死；
   网络名统一为 `lanlink-xxxx`，中继白名单可以只放行 `lanlink-*`。
