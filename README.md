@@ -116,5 +116,13 @@ git push github v0.1.1
   `DEFAULT_RESOLVER_BASE_URL`），新装即可解析短码；设置页可改成自己的地址并一键恢复默认。
   地址支持 `http://`（本地调试）与 `https://`（rustls 握手、默认校验证书，没有跳过校验的开关）。
   部署细节见 `docs/room-code-service.md`。长码（`LL1.` 开头）自包含，不依赖该服务。
-- 日志写入 `/tmp/lanlink/core.log`，「日志」页可查看尾部内容。
+- 日志写入用户数据目录下的 `logs/core.log`，「日志」页可查看尾部内容
+  （macOS：`~/Library/Application Support/com.xiaji.lanlink/logs/core.log`，
+  Windows：`%LOCALAPPDATA%\com.xiaji.lanlink\logs\core.log`）；
+  日志目录权限 0700、文件 0600，只有当前用户可读写。
+- 用户数据（`settings.json` / `rooms.json`）与日志放在同一个数据目录：
+  macOS 为 `~/Library/Application Support/com.xiaji.lanlink`，
+  Windows 为 `%LOCALAPPDATA%\com.xiaji.lanlink`。
+  Windows 从旧版本升级后首次启动会把 `%TEMP%\lanlink` 里的 `settings.json` / `rooms.json`
+  一次性复制过来——只补缺失文件、不覆盖已有配置，复制失败只记日志，不影响启动。
 - 提权与单实例的细节见 `docs/privilege.md`。

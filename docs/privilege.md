@@ -33,7 +33,9 @@ macOS 上 Tauri 应用不能用 `sudo`，只能用 Authorization Services：
 - 提权发生的时机提前到窗口创建之前，用户态进程从不进入 Dock，
   不会出现「两个 LanLink 图标、其中一个没有运行小圆点」；
 - 单实例锁保证任何时候只有一个 App 进程持有锁，第二个实例启动后发现锁被占就直接 `return`；
-- core 的 pid 写在 `/tmp/lanlink/core.pid`，连新 core 前会先回收 15888 与 11010-11013
+- core 的 pid 写在 `<数据目录>/logs/core.pid`（macOS：
+  `~/Library/Application Support/com.xiaji.lanlink/logs/core.pid`，Windows：
+  `%LOCALAPPDATA%\com.xiaji.lanlink\logs\core.pid`），连新 core 前会先回收 15888 与 11010-11013
   上的旧 core 进程，避免「两个 core 抢同一份 peer id」。
 
 ### root 实例的数据目录
@@ -45,9 +47,15 @@ root 的 `$HOME` 是 `/var/root`，直接读默认路径会读不到用户自己
 --elevated-run --data-dir <用户数据目录> --owner <uid:gid>
 ```
 
-写回文件后再把属主 `chown` 回原用户（`config::hand_back`），避免用户态下次启动读不了自己的配置。
-日志文件同理：core 以 root 创建 `/tmp/lanlink/core.log` 后会 chmod 666 并交还属主，
-否则普通用户点「清空日志」会因为没写权限而失败。
+写回文件后再把属主 `chown` 回原用户（`config::hand_back`），目录本身也一并交还，
+避免用户态下次启动读不了自己的配置。
+日志文件同理：core 以 root 创建 `<数据目录>/logs/core.log` 后会把文件收紧到 0600、
+目录收紧到 0700，再把属主交还登录用户——权限比旧版的 0666 更紧（日志里有中继地址和虚拟 IP），
+但属主仍是当前用户，点「清空日志」不会因为没写权限而失败。
+
+Windows 的数据目录是 `%LOCALAPPDATA%\com.xiaji.lanlink`（旧版本在 `%TEMP%\lanlink`）。
+升级后首次启动会把旧目录里的 `settings.json` / `rooms.json` 一次性复制过来：
+只补缺失文件、不覆盖已有配置，失败只记日志，不影响启动。
 
 ## 三、为什么每次启动都要输密码
 
