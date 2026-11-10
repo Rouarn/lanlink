@@ -248,6 +248,47 @@ pub(crate) fn local_ipv4s() -> Vec<Ipv4Addr> {
     ips
 }
 
+/// 本机**物理**网卡的网段 `(地址, 掩码)`。
+///
+/// 用来判断一条原生公告是不是真从物理局域网来的。EasyTier 的 utun / TUN / TAP
+/// 不能算：从 overlay 过来的公告源地址是对端虚拟 IP，那条路本身不稳，不能因为
+/// 它出现过一次就不建转发。
+fn local_lans() -> Vec<(Ipv4Addr, Ipv4Addr)> {
+    let mut lans = Vec::new();
+    let Ok(interfaces) = if_addrs::get_if_addrs() else {
+        return lans;
+    };
+    for interface in interfaces {
+        let if_addrs::IfAddr::V4(v4) = interface.addr else {
+            continue;
+        };
+        if v4.ip.is_loopback() || v4.ip.is_unspecified() || v4.ip.is_link_local() {
+            continue;
+        }
+        let name = interface.name.to_ascii_lowercase();
+        if name.starts_with("utun")
+            || name.starts_with("tun")
+            || name.starts_with("tap")
+            || name.contains("easytier")
+            || name.contains("wintun")
+            || name.contains("vethernet")
+        {
+            continue;
+        }
+        if !lans.contains(&(v4.ip, v4.netmask)) {
+            lans.push((v4.ip, v4.netmask));
+        }
+    }
+    lans
+}
+
+/// `ip` 是否落在本机某个物理局域网网段里。
+fn in_lan(ip: Ipv4Addr, lans: &[(Ipv4Addr, Ipv4Addr)]) -> bool {
+    let ip = u32::from(ip);
+    lans.iter()
+        .any(|(local, mask)| ip & u32::from(*mask) == u32::from(*local) & u32::from(*mask))
+}
+
 /// 绑定 `0.0.0.0:4445`（组播组在各网卡上另行加入）。
 ///
 /// 为什么绑通配地址而不是各网卡地址：macOS 上绑到具体地址的 socket 收不到目的地址
@@ -568,10 +609,16 @@ struct Shared {
     /// 对端世界消失后保留转发的时间：宣告是 UDP 单播，网卡切换 / 防火墙抖动会吞包，
     /// 立刻撤会让列表里的条目闪烁，而重建转发必然换端口（旧条目变成连不上的死地址）。
     grace: Mutex<Duration>,
-    /// 物理局域网里别人（不一定在房间内）的原生公告：(端口, MOTD) → 最近收到时间。
+    /// 物理局域网里别人（不一定在房间内）的原生公告：(端口, 来源 IP) → 最近收到时间。
     /// 用来判断某个对端世界在本机所在局域网里本来就能被发现——能发现就不再建转发、
     /// 伪造公告，否则同一个世界会因为「原生一条 + 伪造一条」在列表里出现两次。
-    native: Mutex<HashMap<(u16, String), Instant>>,
+    ///
+    /// 只认**物理网段**的来源：从 overlay 过来的公告（源地址是对端虚拟 IP）不算，
+    /// 那条路本身不稳定，不能因为它出现过就不要转发。
+    native: Mutex<HashMap<(u16, Ipv4Addr), Instant>>,
+    /// 本机物理网卡的网段 `(地址, 掩码)`，用来判断一条原生公告是不是真的从
+    /// 物理局域网来的。EasyTier 的 utun / TUN 不算物理网卡。
+    lans: Vec<(Ipv4Addr, Ipv4Addr)>,
     /// 本机伪造公告的签名 (本地转发端口, 网线上的 MOTD)，收到回灌时据此过滤
     fake_announcements: Mutex<HashSet<(u16, String)>>,
     /// 当前要播的伪造公告（供发送线程读取）
@@ -654,6 +701,7 @@ impl LanRelay {
             live_peers: Mutex::new(Vec::new()),
             grace: Mutex::new(FORWARD_GRACE),
             native: Mutex::new(HashMap::new()),
+            lans: local_lans(),
             fake_announcements: Mutex::new(HashSet::new()),
             announce: Mutex::new(Vec::new()),
             peers,
@@ -798,13 +846,11 @@ fn recv_loop(shared: Arc<Shared>, socket: UdpSocket) {
                     // 但要记下来——如果某个房间成员的世界本来就能这样被发现，就不要再
                     // 为它建转发和伪造公告，否则列表里会出现两条。
                     if let Some(announcement) = parse_announcement(&buf[..len]) {
-                        shared.native.lock().unwrap().insert(
-                            (
-                                announcement.port,
-                                announced_motd(&announcement.motd, announcement.port),
-                            ),
-                            Instant::now(),
-                        );
+                        shared
+                            .native
+                            .lock()
+                            .unwrap()
+                            .insert((announcement.port, *source.ip()), Instant::now());
                     }
                     continue;
                 }
@@ -918,10 +964,19 @@ fn reconcile(
     shared: &Shared,
     remote: &[RemoteWorld],
     live_peers: &[Ipv4Addr],
-    native: &HashMap<(u16, String), Instant>,
+    native: &HashMap<(u16, Ipv4Addr), Instant>,
     forwards: &mut HashMap<(Ipv4Addr, u16), Forward>,
 ) {
     let peers = shared.peers.lock().unwrap().clone();
+    // 只把「不含任何对端虚拟 IP」的网段当成物理局域网：Windows 上的 EasyTier 适配器
+    // 名字不固定，光靠网卡名可能滤不掉，这里再用 peer 虚拟 IP 兜一层，避免把
+    // overlay 过来的公告误判成「物理局域网原生」而反过来不建转发。
+    let lans: Vec<(Ipv4Addr, Ipv4Addr)> = shared
+        .lans
+        .iter()
+        .copied()
+        .filter(|lan| !peers.iter().any(|peer| in_lan(*peer, std::slice::from_ref(lan))))
+        .collect();
     let live: HashSet<Ipv4Addr> = live_peers.iter().copied().collect();
     let mut wanted: Vec<&RemoteWorld> = Vec::new();
     // 被 peer 快照剔除的对端：宣告还在来，但 EasyTier 那边暂时看不到它，不能据此撤转发
@@ -936,7 +991,7 @@ fn reconcile(
             peer_unknown.insert(world.ip);
             continue;
         }
-        if natively_visible(native, world) {
+        if natively_visible(native, world, &lans) {
             // 同一个物理局域网里：原版客户端自己就能收到对方的公告，再伪造一条会让
             // 列表里出现两个同名世界（IP 不同，原版按 IP:端口 去重，两条都留下）
             native_keys.insert((world.ip, world.port));
@@ -944,7 +999,7 @@ fn reconcile(
                 &format!("native-{}-{}", world.ip, world.port),
                 "INFO",
                 &format!(
-                    "对端 {}:{} 的世界本机能原生发现，不再建本地转发",
+                    "对端 {}:{} 的世界在本机物理局域网里已被原生发现，不再建本地转发",
                     world.ip, world.port
                 ),
             );
@@ -1140,19 +1195,22 @@ fn announced_motd(motd: &str, port: u16) -> String {
 
 /// 这个对端世界在本机所在物理局域网里是否本来就能被发现。
 ///
-/// 判定依据是「近期收到过同端口、同名字的原生公告」——不猜拓扑、不看 EasyTier 的
-/// 路由形态，所以同网段但组播被 AP 隔离时仍然会走伪造公告，不会把功能判断没。
-/// 名字统一用 `announced_motd` 清洗后再比；`games` 会把名字折叠空白并截断，
-/// 因此一方是另一方的前缀也算同一世界。端口号重复的概率极低，再叠加名字前缀比对。
-fn natively_visible(native: &HashMap<(u16, String), Instant>, world: &RemoteWorld) -> bool {
-    let name = announced_motd(&world.name, world.port);
-    if name.is_empty() {
-        return false;
-    }
-    native.iter().any(|((port, motd), _)| {
-        *port == world.port
-            && (motd == &name || motd.starts_with(name.as_str()) || name.starts_with(motd.as_str()))
-    })
+/// 判定依据只有两条：**端口一致** + **公告来源落在我本机的物理网段**。
+/// 不看 MOTD：名字会被 `games` 折叠空白、截断到 48 字符，拿它做匹配既不可靠，
+/// 也会在名字对不上时漏判（结果就是同一个世界出两条）。
+///
+/// 端口是世界打开时随机分配的，同一物理网段里撞到同一个随机端口的概率极低，
+/// 再叠加「源地址必须在我自己的物理网段」，足以认定这是同一个世界。
+/// 从 overlay 过来的公告（源地址是对端虚拟 IP，不在物理网段里）不在此列：
+/// 那条路本身不稳定，不能因为它出现过就不要转发。
+fn natively_visible(
+    native: &HashMap<(u16, Ipv4Addr), Instant>,
+    world: &RemoteWorld,
+    lans: &[(Ipv4Addr, Ipv4Addr)],
+) -> bool {
+    native
+        .iter()
+        .any(|((port, source), _)| *port == world.port && in_lan(*source, lans))
 }
 
 /// 是否已有线程结束（正常运行时只可能是「被迫停止」或 panic）。
@@ -1467,47 +1525,47 @@ mod tests {
         assert!(!is_private(Ipv4Addr::new(8, 8, 8, 8)));
     }
 
-    /// 同网段判定：端口与（可截断的）名字都吻合，才算本机能原生发现。
+    /// 原生可见判定：只看「端口一致 + 来源在我自己的物理网段」，不看 MOTD。
     #[test]
-    fn native_visibility_requires_port_and_name() {
-        let mut native = HashMap::new();
-        native.insert((62854u16, "xiaji - 测试".to_string()), Instant::now());
+    fn native_visibility_requires_port_and_physical_source() {
+        let lans = [
+            (Ipv4Addr::new(192, 168, 31, 115), Ipv4Addr::new(255, 255, 255, 0)),
+        ];
         let world = RemoteWorld {
-            ip: Ipv4Addr::LOCALHOST,
-            port: 62854,
+            ip: Ipv4Addr::new(10, 126, 126, 1),
+            port: 61779,
             name: "xiaji - 测试".to_string(),
         };
-        assert!(natively_visible(&native, &world));
 
-        // games 下发时可能把名字截断：前缀吻合也算同一世界
-        let truncated = RemoteWorld {
-            name: "xiaji".to_string(),
+        // 同端口 + 物理局域网来源：原生能发现，不再伪造
+        let mut native = HashMap::new();
+        native.insert((61779u16, Ipv4Addr::new(192, 168, 31, 155)), Instant::now());
+        assert!(natively_visible(&native, &world, &lans));
+
+        // 名字完全不同也不影响判定（不按 MOTD 匹配）
+        let renamed = RemoteWorld {
+            name: "完全不同的名字".to_string(),
             ..world.clone()
         };
-        assert!(natively_visible(&native, &truncated));
+        assert!(natively_visible(&native, &renamed, &lans));
 
-        // 端口不同、名字无关、名字为空都不算
+        // 端口不同：不是同一个世界
         assert!(!natively_visible(
             &native,
             &RemoteWorld {
-                port: 62855,
+                port: 61780,
                 ..world.clone()
-            }
+            },
+            &lans
         ));
-        assert!(!natively_visible(
-            &native,
-            &RemoteWorld {
-                name: "别人 - 世界".to_string(),
-                ..world.clone()
-            }
-        ));
-        assert!(!natively_visible(
-            &native,
-            &RemoteWorld {
-                name: "  ".to_string(),
-                ..world.clone()
-            }
-        ));
+
+        // 来源是对端虚拟 IP（经 overlay 过来）：不算物理局域网原生，仍要伪造
+        let mut overlay = HashMap::new();
+        overlay.insert((61779u16, Ipv4Addr::new(10, 126, 126, 1)), Instant::now());
+        assert!(!natively_visible(&overlay, &world, &lans));
+
+        // 没有物理网卡时不会误判
+        assert!(!natively_visible(&native, &world, &[]));
     }
 
     /// 桥接链路：对端世界 → 本地转发端口 → 伪造公告；撤掉后端口必须释放。
@@ -1642,26 +1700,30 @@ mod tests {
         assert!(released, "对端世界消失后本地转发端口没有释放");
 
         // 6) 本机能原生发现的世界不再建转发（否则同一个世界会出现两条）
+        // 原生公告的来源必须是「本机物理网段里的另一台机器」，这里用本机物理地址代替。
         let native_port: u16 = 63111;
-        relay
-            .shared
-            .native
-            .lock()
-            .unwrap()
-            .insert((native_port, "xiaji - 测试".to_string()), Instant::now());
-        relay.set_remote_worlds(
-            vec![RemoteWorld {
-                ip: Ipv4Addr::LOCALHOST,
-                port: native_port,
-                name: "xiaji - 测试".to_string(),
-            }],
-            vec![Ipv4Addr::LOCALHOST],
-        );
-        thread::sleep(Duration::from_millis(2500));
-        assert!(
-            relay.shared.announce.lock().unwrap().is_empty(),
-            "能原生发现的世界不该再建转发"
-        );
+        let physical = relay.shared.lans.first().map(|(ip, _)| *ip);
+        if let Some(source) = physical {
+            relay
+                .shared
+                .native
+                .lock()
+                .unwrap()
+                .insert((native_port, source), Instant::now());
+            relay.set_remote_worlds(
+                vec![RemoteWorld {
+                    ip: Ipv4Addr::LOCALHOST,
+                    port: native_port,
+                    name: "xiaji - 测试".to_string(),
+                }],
+                vec![Ipv4Addr::LOCALHOST],
+            );
+            thread::sleep(Duration::from_millis(2500));
+            assert!(
+                relay.shared.announce.lock().unwrap().is_empty(),
+                "能原生发现的世界不该再建转发"
+            );
+        }
     }
 
     #[test]

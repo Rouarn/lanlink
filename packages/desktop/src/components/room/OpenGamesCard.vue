@@ -11,6 +11,11 @@ const { toast } = useApp();
 const { status } = useConnection();
 
 const games = computed(() => status.value?.open_games ?? []);
+/// 有对端《我的世界》世界时补一句说明：游戏内的局域网列表不会显示上面的地址，
+/// 而是本机物理网卡地址 + 本机转发端口（跨网络时也一样），免得被当成"本地残留"。
+const bridged = computed(() =>
+  games.value.some((game) => !game.mine && game.source === "minecraft"),
+);
 const error = computed(() => {
   const message = status.value?.games_error?.trim();
   return message ? `开放游戏同步没起来：${message}` : "";
@@ -76,6 +81,12 @@ async function copy(game: OpenGame): Promise<void> {
 
     <p v-else class="empty">
       还没有人开放游戏。开着《我的世界》的「对局域网开放」，或在下面手动登记一个端口。
+    </p>
+
+    <p v-if="bridged" class="games-hint">
+      《我的世界》「多人游戏」里显示的会是<b>本机局域网地址 + 本机端口</b>（例如
+      192.168.x.x:64252），那是本机为对端世界建的转发端口，和上面的地址是同一个世界；
+      跨网络时也一样，不是本地残留。
     </p>
 
     <p v-if="error" class="field-hint warn">
@@ -185,5 +196,21 @@ async function copy(game: OpenGame): Promise<void> {
   font-size: var(--text-sm);
   line-height: 1.7;
   color: var(--text-3);
+}
+
+.games-hint {
+  margin: 0 0 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  font-size: var(--text-xs);
+  line-height: 1.7;
+  color: var(--text-3);
+}
+
+.games-hint b {
+  color: var(--text-2);
+  font-weight: 600;
 }
 </style>
