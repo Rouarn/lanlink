@@ -402,6 +402,13 @@ impl Forward {
             while !flag.load(Ordering::Relaxed) {
                 match listener.accept() {
                     Ok((stream, addr)) => {
+                        // macOS 上 accept 出来的 socket 会继承监听 socket 的非阻塞标志
+                        // （Linux 不会）。不显式改回阻塞，`pipe` 里第一次 `read` 立刻
+                        // 拿到 `WouldBlock`，被当成对端断开，客户端就会看到
+                        // 「无法连接至服务器 / 连接中断」。
+                        if stream.set_nonblocking(false).is_err() {
+                            continue;
+                        }
                         let _ = stream.set_nodelay(true);
                         let first = !logged_accept.swap(true, Ordering::Relaxed);
                         if first {
@@ -485,6 +492,9 @@ impl Drop for Forward {
 /// 连不上对端时做短重试（`CONNECT_ATTEMPTS` 次、总计约 2 秒）：EasyTier 的 overlay
 /// 在对端重连、网卡切换时会短暂不通，一次失败就把客户端踢掉会让用户看到
 /// 「无法连接至服务器 / 连接中断」。重试仍失败才放弃，并把原因写进日志。
+///
+/// 传进来的 `client` 必须是阻塞 socket（见 accept 处：macOS 会继承非阻塞标志），
+/// 否则第一次读不到数据就会被当成断开，长连接只走完第一批报文就半关对端。
 #[allow(clippy::too_many_arguments)]
 fn pipe(
     client: TcpStream,
@@ -1637,7 +1647,7 @@ mod tests {
         }
         assert_ne!(forward_port, 0, "5 秒内没有为对端世界建起本地转发");
 
-        // 2) 连上转发能真的通到目标世界
+        // 2) 连上转发能真的通到目标世界，而且连接要能持续（不能转发完第一批就半关）
         let mut client =
             TcpStream::connect((Ipv4Addr::LOCALHOST, forward_port)).expect("连接本地转发失败");
         client
@@ -1647,6 +1657,15 @@ mod tests {
         let mut echoed = [0u8; 4];
         client.read_exact(&mut echoed).expect("没有收到转发回来的数据");
         assert_eq!(&echoed, b"ping");
+        // macOS 上 accept 出的 socket 会继承非阻塞标志：转发线程把第一批数据送出去后
+        // 紧接着再 read 会拿到 WouldBlock，如果被当成 EOF 就会半关对端，长连接直接断。
+        thread::sleep(Duration::from_millis(150));
+        client.write_all(b"pong").expect("第二次写入转发失败");
+        let mut echoed = [0u8; 4];
+        client
+            .read_exact(&mut echoed)
+            .expect("转发在第一批数据之后把连接断开了");
+        assert_eq!(&echoed, b"pong");
 
         // 3) 独立的 4445 监听必须收到指向该转发端口的伪造公告
         let mut captured = false;
