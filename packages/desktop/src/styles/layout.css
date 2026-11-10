@@ -7,12 +7,28 @@
   border: 0.5px solid var(--separator);
 }
 
-/* Windows 没有 macOS 的 vibrancy 材质，透明窗口里若根容器不带背景，
-   半透明的侧边栏会直接透出桌面。这里给窗口根容器补不透明背景，
-   侧边栏的半透明 tint 叠在上面仍能保留层次，但不会穿到桌面。 */
-[data-platform="windows"] .window {
+/* Windows：用系统原生标题栏、窗口不透明。
+   内容区四角贴满窗口，不做圆角（否则四角会露出 webview 底色）；
+   也不留 macOS 红绿灯让位的那条空白。 */
+html[data-platform="windows"],
+[data-platform="windows"] body {
   background: var(--window-bg);
 }
+[data-platform="windows"] .window {
+  background: var(--window-bg);
+  border: 0;
+  border-radius: 0;
+}
+[data-platform="windows"] .titlebar-space {
+  display: none;
+}
+[data-platform="windows"] .sidebar-brand {
+  padding-top: 14px;
+}
+
+/* Windows 没有 macOS 的 vibrancy 材质，透明窗口里若根容器不带背景，
+   半透明的侧边栏会直接透出桌面。这里给侧边栏补不透明背景，
+   让 tint 叠在上面仍能保留层次，但不会穿到桌面。 */
 [data-platform="windows"] .sidebar {
   background: var(--group-bg);
 }
