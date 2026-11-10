@@ -122,6 +122,5 @@ Windows 没有 macOS 那种「授权一次短期内复用」的机制，唯一�
    只写 stderr，按普通权限继续启动，点「连接」时再走一次 UAC，界面功能不受影响。
 
 `MultipleInstancesPolicy=IgnoreNew` 防止任务重复拉起；带 `--from-task` 的实例若仍不是
-管理员，就不会再触发任务，避免进程来回拉起。卸载时由 NSIS 的
-`NSIS_HOOK_PREUNINSTALL`（`windows/installer-hooks.nsh`）删除任务；程序被移动到别的目录后，
-下一次以管理员身份启动会自动按新路径重写任务。
+管理员，就不会再触发任务，避免进程来回拉起。安装器不碰这个任务：程序被移动到别的目录后，
+下一次以管理员身份启动会按新路径重写；卸载后任务可能残留，再次运行 LanLink 即可覆盖。

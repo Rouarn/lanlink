@@ -94,6 +94,8 @@ git push github v0.1.1
   （`easytier-macos-aarch64-v2.6.4.zip`、`easytier-macos-x86_64-v2.6.4.zip`、
   `easytier-windows-x86_64-v2.6.4.zip`）并放到 `packages/core/<平台>/`；
 - macOS 走 Ad Hoc 签名（`APPLE_SIGNING_IDENTITY="-"`，无需证书），Windows 不签名，仅供自用；
+- Windows 安装包界面为简体中文，只装文件、建快捷方式，不结束进程：早期版本可能残留的
+  `core\windows-x64\WinDivert64.sys` 不会被清理，卸载后计划任务也可能残留（下次运行覆盖）；
 - Android 目前是空壳（`packages/mobile`），本次不出包；
 - 构建好的安装包在对应 Actions 运行的 Artifacts 里，保留 14 天。
 
