@@ -96,10 +96,14 @@ Windows 没有 macOS 那种「授权一次短期内复用」的机制，唯一�
 任务定义（XML 注册，`schtasks /Create /XML`）：
 
 - 任务名 `LanLink`，不隐藏，用户可在任务计划程序里看到并删除；
-- 触发器：登录时 + 允许按需 `schtasks /Run`；
+- 不设任何触发器：**不会开机或登录自启**，只在需要时 `schtasks /Run` 按需启动；
 - 账户：当前用户，`InteractiveToken` + `RunLevel=HighestAvailable`；
 - 动作：`<安装目录>\LanLink.exe --elevated-run --from-task`，
   工作目录为 exe 所在目录，保证 `core/<平台>` 的相对查找不受影响。
+
+> 升级说明：早期版本的任务带 `LogonTrigger`。任务注册用 `/F` 覆盖写，
+> 而管理员实例每次启动都会调用 `install_silent_task()` 刷新定义，
+> 因此旧任务会在升级后第一次以管理员身份启动时被重写成无触发器的版本，不会继续自启。
 
 启动顺序（`lib.rs` 的 `prepare_launch_windows`）：
 

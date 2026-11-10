@@ -4,9 +4,9 @@
 //! 注册一个「以最高权限运行」的计划任务，之后由任务启动自身。
 //!
 //! 任务定义（XML 注册，避免 `/TR` 的多层引号在路径含空格时出错）：
-//! - 触发器：登录时（`LogonTrigger`），同时允许按需 `schtasks /Run`；
+//! - 不设任何触发器（不会开机/登录自启），只允许按需 `schtasks /Run`；
 //! - 账户：当前用户，`InteractiveToken` + `RunLevel=HighestAvailable`；
-//! - 动作：`<安装目录>\LanLink.exe --elevated-run`，工作目录为 exe 所在目录，
+//! - 动作：`<安装目录>\LanLink.exe --elevated-run --from-task`，工作目录为 exe 所在目录，
 //!   保证 core 的「exe 同级 core/<平台>」查找不受影响；
 //! - 不隐藏任务，用户可以在任务计划程序里自行查看与删除。
 //!
@@ -111,12 +111,7 @@ fn task_xml(exe: &Path) -> Result<String, String> {
     <Description>LanLink：以最高权限静默启动，免去每次 UAC 授权。</Description>
     <URI>\{name}</URI>
   </RegistrationInfo>
-  <Triggers>
-    <LogonTrigger>
-      <Enabled>true</Enabled>
-      <UserId>{account}</UserId>
-    </LogonTrigger>
-  </Triggers>
+  <Triggers />
   <Principals>
     <Principal id="Author">
       <UserId>{account}</UserId>

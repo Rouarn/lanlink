@@ -66,7 +66,8 @@ onMounted(load);
       </div>
     </InfoRow>
     <span class="row-hint">
-      开启后会创建一个名为 LanLink 的计划任务（以最高权限运行），之后启动不再弹 UAC；
+      开启后会创建一个名为 LanLink 的计划任务（以最高权限运行），之后启动不再弹 UAC。
+      任务没有登录/开机触发器，不会自动启动 LanLink，只在需要时按需调用。
       取消会删除该任务并回到「点连接时授权」。两条路径都只影响提权方式，不影响房间与中继配置。
     </span>
     <span v-if="error" class="footnote error">{{ error }}</span>
