@@ -15,9 +15,7 @@
 use std::ffi::OsStr;
 use std::fs;
 use std::os::windows::ffi::OsStrExt;
-use std::os::windows::process::CommandExt;
 use std::path::Path;
-use std::process::Command;
 
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     MessageBoxW, IDYES, MB_ICONQUESTION, MB_ICONWARNING, MB_OK, MB_SETFOREGROUND, MB_YESNO,
@@ -26,13 +24,9 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 /// 计划任务名（任务计划程序里显示为 `\LanLink`）。
 pub const TASK_NAME: &str = "LanLink";
 
-/// 子进程不弹控制台窗口（本程序是 GUI 子系统，但 schtasks 自己会开窗口）。
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-
 fn schtasks(args: &[&str]) -> Result<String, String> {
-    let output = Command::new("schtasks")
+    let output = crate::proc::command("schtasks")
         .args(args)
-        .creation_flags(CREATE_NO_WINDOW)
         .output()
         .map_err(|err| format!("无法执行 schtasks：{err}"))?;
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();

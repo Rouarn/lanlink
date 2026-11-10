@@ -134,8 +134,7 @@ fn is_alive(pid: u32) -> bool {
 
 #[cfg(windows)]
 fn is_alive(pid: u32) -> bool {
-    use std::process::Command;
-    Command::new("tasklist")
+    crate::proc::command("tasklist")
         .args(["/FI", &format!("PID eq {pid}"), "/NH", "/FO", "CSV"])
         .output()
         .map(|out| String::from_utf8_lossy(&out.stdout).contains(&pid.to_string()))

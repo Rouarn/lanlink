@@ -9,12 +9,13 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom};
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Stdio};
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
 
 use crate::config;
+use crate::proc;
 use crate::rooms::Room;
 
 const LOG_TAIL_LINES: usize = 60;
@@ -468,7 +469,7 @@ impl Tunnel {
         // 以管理员身份运行时新建的日志属于 root，交还给登录用户，避免之后清空被拒
         self.relax_log_permissions();
 
-        let mut cmd = Command::new(&core);
+        let mut cmd = proc::command(&core);
         cmd.arg("--network-name")
             .arg(&room.network)
             .arg("--network-secret")
@@ -537,7 +538,7 @@ impl Tunnel {
 
     fn run_cli_json(&self, subcommand: &str) -> Option<serde_json::Value> {
         let cli = self.cli.as_ref()?;
-        let output = Command::new(cli)
+        let output = proc::command(cli)
             .arg("-p")
             .arg(config::RPC_PORTAL)
             .arg("-o")
@@ -615,7 +616,7 @@ fn listen_ports() -> Vec<u16> {
 
 fn port_holders() -> Vec<PortHolder> {
     let mut holders: Vec<PortHolder> = Vec::new();
-    let mut cmd = Command::new("lsof");
+    let mut cmd = proc::command("lsof");
     cmd.arg("-nP");
     for port in listen_ports() {
         cmd.arg(format!("-iTCP:{port}")).arg(format!("-iUDP:{port}"));
@@ -658,7 +659,7 @@ fn port_holders() -> Vec<PortHolder> {
 }
 
 fn full_command(pid: u32, fallback: &str) -> String {
-    Command::new("ps")
+    proc::command("ps")
         .args(["-o", "command=", "-p", &pid.to_string()])
         .output()
         .ok()
@@ -668,7 +669,7 @@ fn full_command(pid: u32, fallback: &str) -> String {
 }
 
 fn pgrep_pids(core: &Path) -> Vec<u32> {
-    let Ok(output) = Command::new("pgrep").arg("-f").arg(core).output() else {
+    let Ok(output) = proc::command("pgrep").arg("-f").arg(core).output() else {
         return Vec::new();
     };
     String::from_utf8_lossy(&output.stdout)

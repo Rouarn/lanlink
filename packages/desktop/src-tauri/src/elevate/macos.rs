@@ -20,7 +20,7 @@ use security_framework_sys::authorization::{
 pub fn show_fatal_alert(message: &str) {
     let text = message.replace('\\', "\\\\").replace('"', "\\\"").replace(['\n', '\r'], " ");
     let script = format!("display alert \"LanLink 无法启动\" message \"{text}\" as critical");
-    let _ = std::process::Command::new("osascript")
+    let _ = crate::proc::command("osascript")
         .arg("-e")
         .arg(script)
         .status();

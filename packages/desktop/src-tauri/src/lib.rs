@@ -2,6 +2,7 @@ mod config;
 mod core;
 mod elevate;
 mod http;
+mod proc;
 mod rooms;
 mod settings;
 mod single;
