@@ -35,13 +35,6 @@ jobs:
             easytier_asset: easytier-macos-aarch64-v2.6.4.zip
             bundles: app,dmg
             suffix: macos-arm64.dmg
-          - name: macos-x64
-            os: macos-15-intel
-            target: x86_64-apple-darwin
-            platform_dir: macos-x64
-            easytier_asset: easytier-macos-x86_64-v2.6.4.zip
-            bundles: app,dmg
-            suffix: macos-x64.dmg
           - name: windows-x64
             os: windows-latest
             target: x86_64-pc-windows-msvc

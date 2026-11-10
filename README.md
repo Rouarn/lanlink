@@ -19,9 +19,11 @@ packages/mobile/           # 移动端占位，暂不实现
 docs/                      # 说明文档与截图
 ```
 
-`packages/core/<平台>/` 使用 EasyTier v2.6.4 的二进制，按 `macos-arm64`、`macos-x64`、
-`windows-x64` 分目录放同名文件，代码由 `platform_dir()` 自动选择。这些二进制体积大，**不进版本库**
+`packages/core/<平台>/` 使用 EasyTier v2.6.4 的二进制，按 `macos-arm64`、`windows-x64`
+分目录放同名文件，代码由 `platform_dir()` 自动选择。这些二进制体积大，**不进版本库**
 （见 `.gitignore`）：本地构建需要自己放进去，GitHub Actions 会按目标平台从 EasyTier 官方 release 下载。
+
+出包只覆盖 macOS（Apple 芯片）与 Windows x64，不再提供 Intel Mac 与 Windows arm64 的产物。
 
 `pnpm-workspace.yaml` 只列举 `packages/desktop`、`packages/shared`、`packages/mobile`，
 不用通配符，避免把 Go 工程和二进制目录扫进 pnpm 安装。
@@ -62,8 +64,7 @@ pnpm install
 
 | 平台 | 构建机 / 目标 | 产物文件名（`<version>` 取自标签） |
 | --- | --- | --- |
-| macOS arm64 | `macos-latest` / `aarch64-apple-darwin` | `LanLink-<version>-macos-arm64.dmg` |
-| macOS x64 | `macos-15-intel` / `x86_64-apple-darwin` | `LanLink-<version>-macos-x64.dmg` |
+| macOS arm64 | `macos-15` / `aarch64-apple-darwin` | `LanLink-<version>-macos-arm64.dmg` |
 | Windows x64 | `windows-latest` / `x86_64-pc-windows-msvc` | `LanLink-<version>-windows-x64-setup.exe` |
 
 ### 怎么发一版
@@ -80,8 +81,8 @@ git push origin v0.1.1
 git push github v0.1.1
 ```
 
-推送标签后 GitHub Actions 会自动跑三个平台的构建，产物在**对应那次运行的 Artifacts** 里
-（Actions → 选带 `v0.1.1` 标签的那次运行 → 页面底部 Artifacts），三个文件分别下载，保留 14 天。
+推送标签后 GitHub Actions 会自动跑两个平台的构建，产物在**对应那次运行的 Artifacts** 里
+（Actions → 选带 `v0.1.1` 标签的那次运行 → 页面底部 Artifacts），分别下载，保留 14 天。
 
 版本号不用手动改 `tauri.conf.json`：工作流会从标签名去掉 `v` 得到版本号，
 在构建前写进 runner 工作区的 `packages/desktop/src-tauri/tauri.conf.json`
@@ -91,8 +92,8 @@ git push github v0.1.1
 此时版本取仓库里 `tauri.conf.json` 的当前值。手动触发不属于「提交触发」，不影响上面的约定。
 
 - easytier 二进制不进仓库，workflow 会按上表平台从 EasyTier 官方 release 下载
-  （`easytier-macos-aarch64-v2.6.4.zip`、`easytier-macos-x86_64-v2.6.4.zip`、
-  `easytier-windows-x86_64-v2.6.4.zip`）并放到 `packages/core/<平台>/`；
+  （`easytier-macos-aarch64-v2.6.4.zip`、`easytier-windows-x86_64-v2.6.4.zip`）
+  并放到 `packages/core/<平台>/`；
 - macOS 走 Ad Hoc 签名（`APPLE_SIGNING_IDENTITY="-"`，无需证书），Windows 不签名，仅供自用；
 - Windows 安装包界面为简体中文，只装文件、建快捷方式，不结束进程：早期版本可能残留的
   `core\windows-x64\WinDivert64.sys` 不会被清理，卸载后计划任务也可能残留（下次运行覆盖）；
