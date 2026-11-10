@@ -540,11 +540,8 @@ impl Tunnel {
         self.sync_lan();
         status.lan_enabled = self.lan_enabled;
         status.lan_relay = self.lan.is_some();
-        // 先报致命错误；没有致命错误时把「降级原因」（例如 4448 被占用）带给界面
-        status.lan_error = self
-            .lan_error
-            .clone()
-            .or_else(|| self.lan.as_ref().and_then(|relay| relay.warning()));
+        // 中继自身没起来（组播端口绑不上等）时才有值
+        status.lan_error = self.lan_error.clone();
 
         // 4.1 房间内开放游戏：与局域网发现开关无关，连上就跑（手动登记也能用）
         self.sync_games();
@@ -553,6 +550,25 @@ impl Tunnel {
             .games_error
             .clone()
             .or_else(|| self.games.as_ref().and_then(|relay| relay.error()));
+
+        // 4.2 把对端开放的游戏交给局域网中继：在本地起 TCP 转发并伪造《我的世界》
+        // 公告，原版「多人游戏」列表才会刷出条目。数据只走宣告通道，不再另发同步报文，
+        // 所以自动发现与手动登记的世界表现一致，同一个世界也只会有一个转发端口。
+        if let Some(lan) = &self.lan {
+            let worlds: Vec<lan::RemoteWorld> = self
+                .games
+                .as_ref()
+                .map(|relay| relay.snapshot())
+                .unwrap_or_default()
+                .into_iter()
+                .map(|game| lan::RemoteWorld {
+                    ip: game.ip,
+                    port: game.port,
+                    name: game.name,
+                })
+                .collect();
+            lan.set_remote_worlds(worlds);
+        }
 
         status.state = self.state;
         status.error = self.error.clone();

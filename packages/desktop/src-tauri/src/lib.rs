@@ -611,6 +611,8 @@ fn prepare_launch_windows(args: &[String]) {
     }
 }
 
+/// Android/iOS 上 Tauri 需要这个宏导出入口符号，桌面端不受影响。
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let args: Vec<String> = std::env::args().collect();
     let arg_value = |name: &str| {

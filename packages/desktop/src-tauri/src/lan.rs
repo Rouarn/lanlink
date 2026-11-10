@@ -18,11 +18,11 @@
 //!    避免把物理局域网里邻居的世界当成自己的。超过 5 秒没再收到视为世界已关闭。
 //!    监听 socket 绑 `0.0.0.0:4445` 并开 `SO_REUSEPORT`，再逐网卡加入组播组——
 //!    绑具体网卡地址在 macOS 上收不到组播，不开 `SO_REUSEPORT` 则与原版客户端互相挤占端口。
-//! 2. **同步**：把「本机世界端口 + MOTD」通过虚拟网内的 UDP 心跳（`4448`）告诉房间成员。
-//!    这项同步是本项目补充的最小协议——EasyTier 只提供节点/对端信息，没有应用层数据通道；
-//!    报文是 `{"lanlink":1,"worlds":[{"port":25565,"motd":"..."}]}`，每个成员只会发给
-//!    `easytier-cli peer` 里出现的对端虚拟 IP，不走公网。
-//! 3. **造条目**：收到别人的端口后，在本机建一个 TCP 转发
+//! 2. **同步**：谁在本机开了什么，交给「开放游戏」宣告通道（`games.rs`，UDP 4449）
+//!    在房间成员之间交换——它已经覆盖自动发现与手动登记，这里不再自带同步协议，
+//!    避免同一个世界建出两个转发端口。`core` 每次状态轮询把对端快照写进来，
+//!    由 `bridge_loop` 对账。
+//! 3. **造条目**：对端开放的每个世界，在本机建一个 TCP 转发
 //!    `0.0.0.0:<本地空闲端口> → <对端虚拟 IP>:<世界端口>`，再每 1.5 秒向本机
 //!    `224.0.2.60:4445` 播一条伪造公告，AD 指向本地端口。
 //!    原版「多人游戏」列表就会刷出条目；点进去走的是 LAN 条目，才有 MC-170460
@@ -30,6 +30,9 @@
 //!
 //! 伪造公告的源地址是发送 socket 绑定的本机网卡地址（而不是中继进程随便选的地址），
 //! 本地转发监听的又是 `0.0.0.0`，因此客户端按源地址发起的连接一定能落到转发上。
+//! 某些环境（屏蔽组播的虚拟网卡等）组播发不出去时，再从回环地址补发一份单播，
+//! 源地址会变成 `127.0.0.1`——转发同样绑在 `0.0.0.0`，从回环连进来也能通。
+//! 只在组播失败时补发，不做无条件双发：双发会让同一个世界在列表里出现两条。
 //!
 //! # 协议版本
 //!
@@ -53,7 +56,6 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use serde::{Deserialize, Serialize};
 use socket2::{Domain, Protocol, Socket, Type};
 
 use crate::games::LocalGames;
@@ -62,10 +64,6 @@ use crate::games::LocalGames;
 pub const MC_GROUP: Ipv4Addr = Ipv4Addr::new(224, 0, 2, 60);
 /// 原版局域网发现的端口。
 pub const MC_PORT: u16 = 4445;
-/// 房间成员之间同步「谁在开世界」用的端口，只走虚拟网。
-const SYNC_PORT: u16 = 4448;
-/// 同步报文的协议版本，未来改结构时用来丢弃旧报文。
-const SYNC_VERSION: u32 = 1;
 /// 原版每 1.5 秒播一次公告，伪造公告保持同样节奏。
 const ANNOUNCE_INTERVAL: Duration = Duration::from_millis(1500);
 /// 超过这个时间没再收到某个世界（或某个成员的心跳），视为它的世界已关闭。
@@ -193,30 +191,18 @@ impl WorldTracker {
 }
 
 // ---------------------------------------------------------------------------
-// 同步报文
+// 对端世界（来自「开放游戏」宣告通道）
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Serialize, Deserialize)]
-struct SyncMessage {
-    lanlink: u32,
-    #[serde(default)]
-    worlds: Vec<SyncWorld>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct SyncWorld {
-    port: u16,
-    #[serde(default)]
-    motd: String,
-}
-
-/// 解析对端心跳；版本不符或格式错误都返回 `None`（对端可能来自更旧的版本）。
-fn parse_sync(bytes: &[u8]) -> Option<SyncMessage> {
-    let message: SyncMessage = serde_json::from_slice(bytes).ok()?;
-    if message.lanlink != SYNC_VERSION {
-        return None;
-    }
-    Some(message)
+/// 房间成员开放的一个世界，用来在本机建 TCP 转发并伪造公告。
+///
+/// 数据由 `core` 从 `games::GameRelay::snapshot()` 写入：那里已经校验过源地址、
+/// 过滤过保留端口，并且只会包含**对端**，所以这里不需要再判断是不是自己的世界。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteWorld {
+    pub ip: Ipv4Addr,
+    pub port: u16,
+    pub name: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -270,15 +256,6 @@ fn bind_sender(ip: Ipv4Addr) -> io::Result<UdpSocket> {
     socket.set_multicast_loop_v4(true)?;
     socket.set_multicast_ttl_v4(4)?;
     Ok(socket.into())
-}
-
-fn bind_sync_socket(port: u16) -> io::Result<UdpSocket> {
-    let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
-    socket.set_reuse_address(true)?;
-    socket.bind(&SocketAddr::from((Ipv4Addr::UNSPECIFIED, port)).into())?;
-    let socket: UdpSocket = socket.into();
-    socket.set_nonblocking(true)?;
-    Ok(socket)
 }
 
 /// 从 `easytier-cli peer` 的 `ipv4` 字段里取出地址：
@@ -417,8 +394,10 @@ struct Shared {
     self_ips: Vec<Ipv4Addr>,
     /// 本机正在开的世界（由组播监听线程写入）
     local: Mutex<WorldTracker>,
-    /// 本机伪造公告用的本地端口，收到回灌的公告时据此过滤
-    fake_ports: Mutex<HashSet<u16>>,
+    /// 对端开放的世界（由 `core` 从开放游戏宣告通道同步写入）
+    remote: Mutex<Vec<RemoteWorld>>,
+    /// 本机伪造公告的签名 (本地转发端口, 网线上的 MOTD)，收到回灌时据此过滤
+    fake_announcements: Mutex<HashSet<(u16, String)>>,
     /// 当前要播的伪造公告（供发送线程读取）
     announce: Mutex<Vec<Announcement>>,
     /// 对端虚拟 IP：由 `core` 统一轮询 `easytier-cli peer` 后写入，中继自己不再起子进程
@@ -427,10 +406,6 @@ struct Shared {
     local_games: LocalGames,
     /// 已经打过日志的失败点，避免每 1.5 秒刷屏
     logged: Mutex<HashSet<String>>,
-    /// 致命错误（线程因此退出），由 `core` 读取后展示
-    error: Mutex<Option<String>>,
-    /// 非致命降级原因（例如 UDP 4448 被占用导致无法同步对端世界端口）
-    degraded: Mutex<Option<String>>,
 }
 
 impl Shared {
@@ -442,17 +417,15 @@ impl Shared {
         self.self_ips.contains(&ip)
     }
 
-    fn is_fake(&self, port: u16) -> bool {
-        self.fake_ports.lock().unwrap().contains(&port)
-    }
-
-    fn is_peer(&self, ip: Ipv4Addr) -> bool {
-        let peers = self.peers.lock().unwrap();
-        if peers.contains(&ip) {
-            return true;
-        }
-        // 刚连上时 peer 列表可能还没刷新出来，用私有网段兜底
-        peers.is_empty() && is_private(ip) && !self.is_self(ip)
+    /// 是不是自己伪造的公告：按 (端口, MOTD) 识别。
+    ///
+    /// 只按端口会把真实的本机世界误判掉——转发端口由系统随机分配，可能撞上原版
+    /// 客户端正在用的端口；加上 MOTD 后与真实公告的区分是确定的。
+    fn is_fake(&self, port: u16, motd: &str) -> bool {
+        self.fake_announcements
+            .lock()
+            .unwrap()
+            .contains(&(port, motd.to_string()))
     }
 
     fn log(&self, level: &str, message: &str) {
@@ -466,13 +439,6 @@ impl Shared {
         if self.logged.lock().unwrap().insert(key.to_string()) {
             self.log(level, message);
         }
-    }
-
-    /// 记录致命错误并停下所有线程（`core` 会读走原因并决定是否重试）。
-    fn fail(&self, key: &str, message: &str) {
-        *self.error.lock().unwrap() = Some(message.to_string());
-        self.log_once(key, "ERROR", message);
-        self.stop.store(true, Ordering::Relaxed);
     }
 }
 
@@ -492,17 +458,6 @@ impl LanRelay {
         peers: Arc<Mutex<Vec<Ipv4Addr>>>,
         local_games: LocalGames,
     ) -> Result<Self, String> {
-        Self::start_with_sync_port(name, log, peers, local_games, SYNC_PORT)
-    }
-
-    /// `sync_port` 仅用于测试（模拟 4448 被占用时的降级路径）。
-    fn start_with_sync_port(
-        name: String,
-        log: PathBuf,
-        peers: Arc<Mutex<Vec<Ipv4Addr>>>,
-        local_games: LocalGames,
-        sync_port: u16,
-    ) -> Result<Self, String> {
         let self_ips = local_ipv4s();
         if self_ips.is_empty() {
             return Err("找不到可用网卡地址，无法开启局域网发现".to_string());
@@ -514,13 +469,12 @@ impl LanRelay {
             stop: AtomicBool::new(false),
             self_ips: self_ips.clone(),
             local: Mutex::new(WorldTracker::default()),
-            fake_ports: Mutex::new(HashSet::new()),
+            remote: Mutex::new(Vec::new()),
+            fake_announcements: Mutex::new(HashSet::new()),
             announce: Mutex::new(Vec::new()),
             peers,
             local_games,
             logged: Mutex::new(HashSet::new()),
-            error: Mutex::new(None),
-            degraded: Mutex::new(None),
         });
 
         // 1) 组播监听：单个 socket 绑通配地址，再逐网卡加入组播组
@@ -549,22 +503,7 @@ impl LanRelay {
             ));
         }
 
-        // 2) 房间内同步端口：绑不上不整体失败，只降级为「本机发现」
-        let sync = match bind_sync_socket(sync_port) {
-            Ok(socket) => Some(socket),
-            Err(err) => {
-                let reason =
-                    format!("UDP {sync_port} 被占用，无法同步对端世界端口：{err}");
-                shared.log(
-                    "WARN",
-                    &format!("{reason}（局域网发现降级：只能看到本机世界，对端世界不会出现在列表里）"),
-                );
-                *shared.degraded.lock().unwrap() = Some(reason);
-                None
-            }
-        };
-
-        // 3) 伪造公告的发送 socket
+        // 2) 伪造公告的发送 socket
         let mut senders = Vec::new();
         for ip in &self_ips {
             match bind_sender(*ip) {
@@ -583,9 +522,10 @@ impl LanRelay {
             let shared = shared.clone();
             handles.push(thread::spawn(move || recv_loop(shared, receiver)));
         }
-        if let Some(sync) = sync {
+        {
+            // 对端世界 → 本地 TCP 转发 + 伪造公告
             let shared = shared.clone();
-            handles.push(thread::spawn(move || sync_loop(shared, sync)));
+            handles.push(thread::spawn(move || bridge_loop(shared)));
         }
         {
             let shared = shared.clone();
@@ -595,7 +535,7 @@ impl LanRelay {
         shared.log(
             "INFO",
             &format!(
-                "局域网发现中继已启动（本机地址 {}，同步端口 {sync_port}）",
+                "局域网发现中继已启动（本机地址 {}）",
                 self_ips
                     .iter()
                     .map(ToString::to_string)
@@ -607,6 +547,11 @@ impl LanRelay {
         Ok(Self { shared, handles })
     }
 
+    /// 更新「对端开放的世界」：`core` 每次状态轮询从开放游戏通道取快照后写入。
+    pub fn set_remote_worlds(&self, worlds: Vec<RemoteWorld>) {
+        *self.shared.remote.lock().unwrap() = worlds;
+    }
+
     /// 线程是否都还在跑：既看停止标志，也看 `JoinHandle`——
     /// 线程 panic 后标志仍是「运行中」，只看标志会让界面一直显示正常。
     pub fn alive(&self) -> bool {
@@ -615,18 +560,10 @@ impl LanRelay {
 
     /// 致命错误原因（正常运行时为 `None`）。
     pub fn error(&self) -> Option<String> {
-        if let Some(error) = self.shared.error.lock().unwrap().clone() {
-            return Some(error);
-        }
         if !self.shared.stopped() && any_finished(&self.handles) {
             return Some("局域网发现线程意外退出（可能发生 panic），已停止".to_string());
         }
         None
-    }
-
-    /// 非致命降级原因（中继仍在跑，但少了一项能力）。
-    pub fn warning(&self) -> Option<String> {
-        self.shared.degraded.lock().unwrap().clone()
     }
 
     pub fn stop(&mut self) {
@@ -638,7 +575,8 @@ impl LanRelay {
             let _ = handle.join();
         }
         self.shared.announce.lock().unwrap().clear();
-        self.shared.fake_ports.lock().unwrap().clear();
+        self.shared.fake_announcements.lock().unwrap().clear();
+        self.shared.remote.lock().unwrap().clear();
         self.shared.local_games.lock().unwrap().clear_minecraft();
         self.shared.log("INFO", "局域网发现中继已停止");
     }
@@ -650,7 +588,7 @@ impl Drop for LanRelay {
     }
 }
 
-/// 组播监听：只认本机网卡发出的公告，伪造的回灌按端口过滤。
+/// 组播监听：只认本机网卡发出的公告，伪造的回灌按 (端口, MOTD) 过滤。
 fn recv_loop(shared: Arc<Shared>, socket: UdpSocket) {
     let mut buf = [0u8; MAX_PACKET];
     let mut last_sweep = Instant::now();
@@ -667,7 +605,7 @@ fn recv_loop(shared: Arc<Shared>, socket: UdpSocket) {
                 let Some(announcement) = parse_announcement(&buf[..len]) else {
                     continue;
                 };
-                if shared.is_fake(announcement.port) {
+                if shared.is_fake(announcement.port, &announcement.motd) {
                     // 自己伪造的公告被回灌，忽略，避免把自己当成房主
                     continue;
                 }
@@ -733,124 +671,98 @@ fn publish_local_worlds(shared: &Shared) {
     shared.local_games.lock().unwrap().set_minecraft(worlds);
 }
 
-/// 房间内同步：发本机世界端口、收对端端口、维护转发与伪造公告。
-fn sync_loop(shared: Arc<Shared>, socket: UdpSocket) {
-    let mut remote: HashMap<(Ipv4Addr, u16), (String, Instant)> = HashMap::new();
+/// 按「对端开放的世界」维护 TCP 转发与伪造公告。
+///
+/// 数据源是开放游戏宣告通道（`core` 每秒写入一次），不再自己收发同步报文：
+/// 自动发现与手动登记的端口走同一条路，同一世界也只会有一个转发端口。
+fn bridge_loop(shared: Arc<Shared>) {
     let mut forwards: HashMap<(Ipv4Addr, u16), Forward> = HashMap::new();
-    let mut last_send: Option<Instant> = None;
     let mut last_sweep = Instant::now();
-    let mut buf = [0u8; MAX_PACKET];
 
     while !shared.stopped() {
-        // 1) 收心跳（非阻塞，一次把队列排空）
-        loop {
-            match socket.recv_from(&mut buf) {
-                Ok((len, source)) => {
-                    let SocketAddr::V4(source) = source else {
-                        continue;
-                    };
-                    let ip = *source.ip();
-                    if !shared.is_peer(ip) {
-                        continue;
-                    }
-                    let Some(message) = parse_sync(&buf[..len]) else {
-                        continue;
-                    };
-                    let now = Instant::now();
-                    for world in message.worlds {
-                        if world.port == 0 {
-                            continue;
-                        }
-                        remote.insert((ip, world.port), (world.motd, now));
-                    }
-                }
-                Err(err) if err.kind() == io::ErrorKind::WouldBlock => break,
-                Err(err) => {
-                    // 非阻塞 socket 上出现其它错误，说明这个 socket 已经不可用：
-                    // 记下原因并让中继整体停下，由 core 决定是否重试，不静默继续。
-                    shared.fail("sync-recv", &format!("读取同步报文失败：{err}"));
-                    break;
-                }
-            }
-        }
-
-        // 2) 周期发送本机端口（对端列表由 core 统一维护，见 Shared::peers）
-        if last_send
-            .map(|at| at.elapsed() >= ANNOUNCE_INTERVAL)
-            .unwrap_or(true)
-        {
-            send_sync(&shared, &socket);
-            last_send = Some(Instant::now());
-        }
-
-        // 3) 过期摘除 + 重建转发
         if last_sweep.elapsed() >= Duration::from_secs(1) {
             last_sweep = Instant::now();
-            let now = Instant::now();
-            remote.retain(|_, (_, seen)| now.saturating_duration_since(*seen) < WORLD_TTL);
+            let remote = shared.remote.lock().unwrap().clone();
             reconcile(&shared, &remote, &mut forwards);
         }
-
         thread::sleep(TICK);
     }
 
     // 先摘掉伪造公告，再关转发端口：断开房间后条目应尽快消失
     shared.announce.lock().unwrap().clear();
-    shared.fake_ports.lock().unwrap().clear();
+    shared.fake_announcements.lock().unwrap().clear();
     forwards.clear();
 }
 
 /// 让转发与伪造公告跟上当前的对端世界集合。
 fn reconcile(
     shared: &Shared,
-    remote: &HashMap<(Ipv4Addr, u16), (String, Instant)>,
+    remote: &[RemoteWorld],
     forwards: &mut HashMap<(Ipv4Addr, u16), Forward>,
 ) {
-    for (&(ip, port), (motd, _)) in remote {
-        if forwards.contains_key(&(ip, port)) {
+    let peers = shared.peers.lock().unwrap().clone();
+    // 只处理「还在房间里的对端」：对端退出房间时 peer 列表会先于宣告 TTL 更新，
+    // 这里立刻收手，不把一个已经连不通的地址继续摆在列表里。列表为空视为尚未刷新。
+    let wanted: Vec<&RemoteWorld> = remote
+        .iter()
+        .filter(|world| !shared.is_self(world.ip))
+        .filter(|world| peers.is_empty() || peers.contains(&world.ip))
+        .collect();
+
+    for world in &wanted {
+        let key = (world.ip, world.port);
+        if forwards.contains_key(&key) {
             continue;
         }
-        let motd = if motd.trim().is_empty() {
+        let motd = if world.name.trim().is_empty() {
             shared.name.clone()
         } else {
-            motd.clone()
+            world.name.clone()
         };
-        match Forward::start(ip, port, motd) {
+        match Forward::start(world.ip, world.port, motd) {
             Ok(forward) => {
                 shared
-                    .fake_ports
+                    .fake_announcements
                     .lock()
                     .unwrap()
-                    .insert(forward.port);
+                    .insert((forward.port, announced_motd(&forward.motd, forward.port)));
                 shared.log(
                     "INFO",
                     &format!(
-                        "对端 {ip} 的世界端口 {port} 已就绪：本机转发 端口 {}",
-                        forward.port
+                        "对端 {} 的世界端口 {} 已就绪：本机转发 端口 {}",
+                        world.ip, world.port, forward.port
                     ),
                 );
-                forwards.insert((ip, port), forward);
+                forwards.insert(key, forward);
             }
             Err(err) => shared.log_once(
-                &format!("fwd-{ip}-{port}"),
+                &format!("fwd-{}-{}", world.ip, world.port),
                 "WARN",
-                &format!("为 {ip}:{port} 建立本地转发失败：{err}"),
+                &format!(
+                    "为 {}:{} 建立本地转发失败：{err}",
+                    world.ip, world.port
+                ),
             ),
         }
     }
 
+    // 对端关掉世界 / 离开房间 / 本机断开，都会走到这里：撤公告 + 关端口
     let stale: Vec<(Ipv4Addr, u16)> = forwards
         .keys()
         .copied()
-        .filter(|key| !remote.contains_key(key))
+        .filter(|key| !wanted.iter().any(|world| (world.ip, world.port) == *key))
         .collect();
     for key in stale {
         if let Some(forward) = forwards.remove(&key) {
-            shared.fake_ports.lock().unwrap().remove(&forward.port);
+            shared
+                .fake_announcements
+                .lock()
+                .unwrap()
+                .remove(&(forward.port, announced_motd(&forward.motd, forward.port)));
             shared.log(
                 "INFO",
                 &format!(
-                    "对端 {}:{} 的世界已关闭，移除本地转发端口 {}",
+                    "对端 {}:{} 的世界已关闭或离开房间，移除本地转发端口 {}",
                     key.0, key.1, forward.port
                 ),
             );
@@ -868,38 +780,14 @@ fn reconcile(
     *shared.announce.lock().unwrap() = announce;
 }
 
-/// 把本机世界里「最近 5 秒还有公告」的端口发给房间成员。
-fn send_sync(shared: &Shared, socket: &UdpSocket) {
-    let worlds: Vec<SyncWorld> = shared
-        .local
-        .lock()
-        .unwrap()
-        .active()
-        .into_iter()
-        .map(|world| SyncWorld {
-            port: world.port,
-            motd: world.motd,
-        })
-        .collect();
-    let Ok(payload) = serde_json::to_vec(&SyncMessage {
-        lanlink: SYNC_VERSION,
-        worlds,
-    }) else {
-        return;
-    };
-    let peers = shared.peers.lock().unwrap().clone();
-    for peer in peers {
-        if shared.is_self(peer) {
-            continue;
-        }
-        if let Err(err) = socket.send_to(&payload, SocketAddr::from((peer, SYNC_PORT))) {
-            shared.log_once(
-                &format!("sync-send-{peer}"),
-                "WARN",
-                &format!("向对端 {peer}:{SYNC_PORT} 同步世界端口失败：{err}"),
-            );
-        }
-    }
+/// 伪造公告在网线上实际的 MOTD。
+///
+/// `build_announcement` 会清掉报文标记、折叠空白，回灌后被解析出来的也是清洗过的
+/// 形态；登记与比对必须用同一个形态，否则自己伪造的公告会被当成本机世界。
+fn announced_motd(motd: &str, port: u16) -> String {
+    parse_announcement(build_announcement(motd, port).as_bytes())
+        .map(|announcement| announcement.motd)
+        .unwrap_or_default()
 }
 
 /// 是否已有线程结束（正常运行时只可能是「被迫停止」或 panic）。
@@ -907,8 +795,13 @@ fn any_finished(handles: &[JoinHandle<()>]) -> bool {
     handles.iter().any(|handle| handle.is_finished())
 }
 
-/// 每 1.5 秒向本机组播地址播一次伪造公告，让原版「多人游戏」列表刷出条目。
+/// 每 1.5 秒播一次伪造公告，让原版「多人游戏」列表刷出条目。
+///
+/// 主路径是组播。只有某个网卡发组播失败时，才从回环地址单播一份给本机 `4445`：
+/// 这类环境里原版仍能收到，源地址是 `127.0.0.1`，而转发绑在 `0.0.0.0`，
+/// 从回环连进来同样能进世界。组播成功时不补发，避免同一个世界出现两条。
 fn fake_loop(shared: Arc<Shared>, senders: Vec<(Ipv4Addr, UdpSocket)>) {
+    let loopback = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).ok();
     let mut last: Option<Instant> = None;
     while !shared.stopped() {
         let list = shared.announce.lock().unwrap().clone();
@@ -924,8 +817,21 @@ fn fake_loop(shared: Arc<Shared>, senders: Vec<(Ipv4Addr, UdpSocket)>) {
                         shared.log_once(
                             &format!("fake-{ip}"),
                             "WARN",
-                            &format!("发送伪造公告失败（网卡 {ip}）：{err}"),
+                            &format!("向 {MC_GROUP}:{MC_PORT} 发送伪造公告失败（网卡 {ip}）：{err}"),
                         );
+                        let Some(loopback) = &loopback else {
+                            continue;
+                        };
+                        if let Err(err) = loopback.send_to(
+                            payload.as_bytes(),
+                            SocketAddr::from((Ipv4Addr::LOCALHOST, MC_PORT)),
+                        ) {
+                            shared.log_once(
+                                "fake-loopback",
+                                "WARN",
+                                &format!("单播伪造公告到 127.0.0.1:{MC_PORT} 失败：{err}"),
+                            );
+                        }
                     }
                 }
             }
@@ -1123,42 +1029,6 @@ mod tests {
         assert!(any_finished(std::slice::from_ref(&done)));
     }
 
-    /// UDP 4448 被别的进程占用时，局域网发现应降级而不是整体启动失败。
-    ///
-    /// 依赖 BSD/macOS 的 `SO_REUSEADDR` 语义：先绑定的 socket 没开 reuse 时，后绑定会失败。
-    /// Windows 的 `SO_REUSEADDR` 允许重复绑定，因此这条用例只在 unix 上有意义。
-    #[cfg(unix)]
-    #[test]
-    fn sync_port_conflict_degrades_instead_of_failing() {
-        let occupied = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).expect("绑定临时端口失败");
-        let port = occupied.local_addr().unwrap().port();
-        let log = std::env::temp_dir().join(format!(
-            "lanlink-lan-degrade-{}-{:?}.log",
-            std::process::id(),
-            std::thread::current().id()
-        ));
-        let peers = Arc::new(Mutex::new(Vec::new()));
-        let local_games = Arc::new(Mutex::new(crate::games::LocalGamesState::default()));
-        let relay = match LanRelay::start_with_sync_port(
-            "测试房间".to_string(),
-            log,
-            peers,
-            local_games,
-            port,
-        ) {
-            Ok(relay) => relay,
-            Err(err) => {
-                // 某些环境（CI 容器）不允许绑定组播：跳过，不影响其余断言
-                eprintln!("本机无法绑定组播，跳过降级断言：{err}");
-                return;
-            }
-        };
-        let warning = relay.warning();
-        assert!(warning.is_some(), "同步端口被占用时应给出降级原因");
-        assert!(relay.alive(), "降级后中继本身仍应在运行");
-        drop(relay);
-    }
-
     /// 端到端验证采集链路：按原版节奏向 `224.0.2.60:4445` 播一条公告，
     /// 中继必须把它认成本机世界并写进「开放游戏」的本机游戏表。
     #[test]
@@ -1170,12 +1040,11 @@ mod tests {
         ));
         let peers = Arc::new(Mutex::new(Vec::new()));
         let local_games = Arc::new(Mutex::new(crate::games::LocalGamesState::default()));
-        let relay = match LanRelay::start_with_sync_port(
+        let relay = match LanRelay::start(
             "测试房间".to_string(),
             log,
             peers,
             local_games.clone(),
-            SYNC_PORT,
         ) {
             Ok(relay) => relay,
             Err(err) => {
@@ -1225,24 +1094,130 @@ mod tests {
         assert!(!is_private(Ipv4Addr::new(8, 8, 8, 8)));
     }
 
+    /// 桥接链路：对端世界 → 本地转发端口 → 伪造公告；撤掉后端口必须释放。
+    ///
+    /// 对端用本机回环上的 echo 服务代替（只需验证「连上转发能通到目标端口」），
+    /// 同时用一个独立的 4445 监听确认伪造公告确实播了出去。
     #[test]
-    fn sync_message_round_trip() {
-        let payload = serde_json::to_vec(&SyncMessage {
-            lanlink: SYNC_VERSION,
-            worlds: vec![SyncWorld {
-                port: 25565,
-                motd: "Steve - World".to_string(),
-            }],
-        })
-        .unwrap();
-        let parsed = parse_sync(&payload).unwrap();
-        assert_eq!(parsed.worlds.len(), 1);
-        assert_eq!(parsed.worlds[0].port, 25565);
-        assert_eq!(parsed.worlds[0].motd, "Steve - World");
+    fn bridge_forwards_remote_world_and_releases_port() {
+        let log = std::env::temp_dir().join(format!(
+            "lanlink-lan-bridge-{}-{:?}.log",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let peers = Arc::new(Mutex::new(Vec::new()));
+        let local_games = Arc::new(Mutex::new(crate::games::LocalGamesState::default()));
+        let relay = match LanRelay::start("测试房间".to_string(), log, peers, local_games.clone()) {
+            Ok(relay) => relay,
+            Err(err) => {
+                eprintln!("本机无法绑定 {MC_GROUP}:{MC_PORT}，跳过桥接验证：{err}");
+                return;
+            }
+        };
 
-        // 版本不符 / 坏 JSON 一律丢弃
-        assert!(parse_sync(b"{\"lanlink\":2,\"worlds\":[]}").is_none());
-        assert!(parse_sync(b"not json").is_none());
+        // 目标世界：本机回环上起一个 echo 服务
+        let echo = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("echo 监听失败");
+        let echo_port = echo.local_addr().unwrap().port();
+        let _echo_thread = thread::spawn(move || {
+            for stream in echo.incoming().flatten() {
+                thread::spawn(move || {
+                    let mut stream = stream;
+                    let mut buf = [0u8; 64];
+                    while let Ok(n) = stream.read(&mut buf) {
+                        if n == 0 || stream.write_all(&buf[..n]).is_err() {
+                            break;
+                        }
+                    }
+                });
+            }
+        });
+
+        relay.set_remote_worlds(vec![RemoteWorld {
+            ip: Ipv4Addr::LOCALHOST,
+            port: echo_port,
+            name: "Test World".to_string(),
+        }]);
+
+        // 1) 转发端口出现
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut forward_port = 0;
+        while Instant::now() < deadline {
+            let port = relay
+                .shared
+                .announce
+                .lock()
+                .unwrap()
+                .first()
+                .map(|announcement| announcement.port);
+            if let Some(port) = port {
+                forward_port = port;
+                break;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        assert_ne!(forward_port, 0, "5 秒内没有为对端世界建起本地转发");
+
+        // 2) 连上转发能真的通到目标世界
+        let mut client =
+            TcpStream::connect((Ipv4Addr::LOCALHOST, forward_port)).expect("连接本地转发失败");
+        client
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        client.write_all(b"ping").expect("写入转发失败");
+        let mut echoed = [0u8; 4];
+        client.read_exact(&mut echoed).expect("没有收到转发回来的数据");
+        assert_eq!(&echoed, b"ping");
+
+        // 3) 独立的 4445 监听必须收到指向该转发端口的伪造公告
+        let mut captured = false;
+        if let Ok(sniffer) = bind_receiver() {
+            let mut joined = false;
+            for ip in local_ipv4s() {
+                joined |= sniffer.join_multicast_v4(&MC_GROUP, &ip).is_ok();
+            }
+            if joined {
+                let deadline = Instant::now() + Duration::from_secs(3);
+                let mut buf = [0u8; MAX_PACKET];
+                while Instant::now() < deadline {
+                    if let Ok((len, _)) = sniffer.recv_from(&mut buf) {
+                        if let Some(announcement) = parse_announcement(&buf[..len]) {
+                            if announcement.port == forward_port
+                                && announcement.motd == "Test World"
+                            {
+                                captured = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(captured, "3 秒内没有在本机组播上收到伪造公告");
+
+        // 4) 自己伪造的公告不能被当成本机世界
+        assert!(
+            !local_games
+                .lock()
+                .unwrap()
+                .snapshot()
+                .iter()
+                .any(|game| game.port == forward_port),
+            "伪造公告被当成了本机世界"
+        );
+
+        // 5) 对端世界消失后，转发端口必须释放
+        relay.set_remote_worlds(Vec::new());
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let released = loop {
+            if TcpListener::bind((Ipv4Addr::UNSPECIFIED, forward_port)).is_ok() {
+                break true;
+            }
+            if Instant::now() >= deadline {
+                break false;
+            }
+            thread::sleep(Duration::from_millis(50));
+        };
+        assert!(released, "对端世界消失后本地转发端口没有释放");
     }
 
     #[test]
