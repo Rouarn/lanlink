@@ -943,7 +943,7 @@ pub(crate) fn timestamp() -> String {
 #[cfg(windows)]
 pub(crate) fn timestamp() -> String {
     use windows_sys::Win32::Foundation::SYSTEMTIME;
-    use windows_sys::Win32::System::Time::GetLocalTime;
+    use windows_sys::Win32::System::SystemInformation::GetLocalTime;
 
     let mut local: SYSTEMTIME = unsafe { std::mem::zeroed() };
     unsafe {
