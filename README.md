@@ -62,8 +62,8 @@ pnpm install
 
 | 平台 | 构建机 / 目标 | 产物文件名 |
 | --- | --- | --- |
-| macOS arm64 | `macos-14` / `aarch64-apple-darwin` | `LanLink-0.1.0-macos-arm64.dmg` |
-| macOS x64 | `macos-13` / `x86_64-apple-darwin` | `LanLink-0.1.0-macos-x64.dmg` |
+| macOS arm64 | `macos-latest` / `aarch64-apple-darwin` | `LanLink-0.1.0-macos-arm64.dmg` |
+| macOS x64 | `macos-15-intel` / `x86_64-apple-darwin` | `LanLink-0.1.0-macos-x64.dmg` |
 | Windows x64 | `windows-latest` / `x86_64-pc-windows-msvc` | `LanLink-0.1.0-windows-x64-setup.exe` |
 
 - easytier 二进制不进仓库，workflow 会按上表平台从 EasyTier 官方 release 下载
@@ -75,8 +75,10 @@ pnpm install
 
 ## 说明
 
-- EasyTier 在 macOS 上创建 TUN 网卡需要 root。首次点「连接」会弹出系统授权框，
-  授权后应用以管理员身份重新启动并自动连接（与官方 GUI 相同做法）。
+- EasyTier 创建 TUN 网卡需要管理员权限。首次点「连接」会弹系统授权框，
+  授权后应用以管理员身份重新启动并自动连接（与官方 GUI 相同做法）：
+  macOS 用 `AuthorizationExecuteWithPrivileges`，Windows 用 `ShellExecuteExW` + `runas`
+  （UAC 点「否」会提示「你取消了管理员授权，本次未连接」，原窗口继续可用）。
 - 中继服务器在「设置 → 运行环境」里由用户自己填写，程序不内置任何默认地址；
   未填写时创建/加入不可用。网络名、密钥随房间生成，不在代码里写死。
 - 短码解析服务有一个内置默认地址（常量在 `src-tauri/src/settings.rs` 的

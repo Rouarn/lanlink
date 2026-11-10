@@ -900,6 +900,9 @@ fn candidate_dirs() -> Vec<PathBuf> {
     // 打包态：可执行文件同级的 resources/core 或 .app/Contents/Resources 下
     if let Ok(exe) = std::env::current_exe() {
         if let Some(exe_dir) = exe.parent() {
+            // Windows 的资源目录就是 exe 所在目录（安装包把 core 拷到 <安装目录>/core）
+            #[cfg(windows)]
+            dirs.push(exe_dir.join("core").join(platform));
             dirs.push(exe_dir.join("resources").join("core").join(platform));
             dirs.push(
                 exe_dir
