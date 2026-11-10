@@ -24,6 +24,9 @@ export type RoomRole = "host" | "member";
 /** `short` 本地短码（仅本机可解析）/ `long` 自包含完整码 */
 export type RoomKind = "short" | "long";
 
+/** 短码注册到解析服务的结果：已注册 / 尝试过但失败 / 没配解析服务、未尝试 */
+export type RoomRegistration = "ok" | "failed" | "skipped";
+
 export interface Room {
   code: string;
   name: string;
@@ -34,6 +37,8 @@ export interface Room {
   kind: RoomKind;
   /** 短码是否已注册到解析服务（可跨机器解析） */
   shared: boolean;
+  /** 注册结果：界面只在 `failed` 时提示「没有注册成功」 */
+  registration: RoomRegistration;
   created_at: number;
   last_used: number;
 }
@@ -44,6 +49,7 @@ export interface ActiveRoom {
   name: string;
   role: RoomRole;
   kind: RoomKind;
+  registration: RoomRegistration;
 }
 
 export interface Settings {

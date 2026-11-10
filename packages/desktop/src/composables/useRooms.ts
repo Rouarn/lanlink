@@ -1,7 +1,7 @@
 import { computed, ref } from "vue";
 import { ipc } from "../lib/ipc";
 import { activeTab, busy, message } from "../stores/app";
-import type { ActiveRoom, Room } from "../types";
+import type { ActiveRoom, Room, RoomRegistration } from "../types";
 import { useCopyFeedback } from "./useClipboard";
 import { useSettings } from "./useSettings";
 import { useTunnel } from "./useTunnel";
@@ -19,6 +19,10 @@ const longError = ref("");
 const roomCodeCopy = useCopyFeedback();
 const longCodeCopy = useCopyFeedback();
 
+/** 没有当前房间时一律视为「未尝试注册」，界面据此不显示任何注册提示，
+ *  不能把「没有数据」当成「注册失败」。 */
+const NO_REGISTRATION: RoomRegistration = "skipped";
+
 const activeRoom = computed<ActiveRoom | null>(() => {
   const { status } = useTunnel();
   if (status.value?.room) {
@@ -27,6 +31,7 @@ const activeRoom = computed<ActiveRoom | null>(() => {
       name: status.value.room_name ?? room.value?.name ?? status.value.room,
       role: status.value.role ?? room.value?.role ?? "member",
       kind: room.value?.kind ?? "short",
+      registration: room.value?.registration ?? NO_REGISTRATION,
     };
   }
   return room.value
@@ -35,6 +40,7 @@ const activeRoom = computed<ActiveRoom | null>(() => {
         name: room.value.name,
         role: room.value.role,
         kind: room.value.kind,
+        registration: room.value.registration ?? NO_REGISTRATION,
       }
     : null;
 });
@@ -50,6 +56,15 @@ function requireRelay(): boolean {
   return false;
 }
 
+/** 清掉跟「本次房间」绑定的临时状态：解析预览、导出的完整码、导出错误。
+ *  断开或切到下一个房间时都要清，别让上一轮的结果留在下一屏。 */
+function clearRoomExtras(): void {
+  preview.value = null;
+  previewCode.value = "";
+  longCode.value = "";
+  longError.value = "";
+}
+
 async function createRoom(): Promise<void> {
   if (!requireRelay()) return;
   if (!roomName.value.trim()) {
@@ -58,8 +73,7 @@ async function createRoom(): Promise<void> {
   }
   busy.value = true;
   message.value = "";
-  longCode.value = "";
-  longError.value = "";
+  clearRoomExtras();
   try {
     const created = await ipc.createRoom(roomName.value.trim());
     room.value = created;
@@ -82,7 +96,7 @@ async function lookupCode(): Promise<void> {
   }
   busy.value = true;
   message.value = "";
-  longError.value = "";
+  clearRoomExtras();
   try {
     preview.value = await ipc.resolveCode(code);
     previewCode.value = code;
@@ -102,7 +116,7 @@ async function joinResolved(): Promise<void> {
     room.value = preview.value;
     await useTunnel().connect(previewCode.value);
     await loadRecent();
-    preview.value = null;
+    clearRoomExtras();
   } catch (err) {
     message.value = String(err);
   } finally {
@@ -131,6 +145,7 @@ async function copyLongCode(): Promise<void> {
 async function reconnect(target: Room): Promise<void> {
   busy.value = true;
   message.value = "";
+  clearRoomExtras();
   try {
     room.value = target;
     await useTunnel().connect(target.code);
@@ -162,9 +177,11 @@ async function clearRooms(): Promise<void> {
   }
 }
 
-/** 断开后清掉「当前房间」卡片，界面回到未连接；最近房间列表不受影响。 */
+/** 断开后清掉当前房间与它的全部临时状态，界面回到未连接；
+ *  最近房间列表不受影响。 */
 function resetActiveRoom(): void {
   room.value = null;
+  clearRoomExtras();
 }
 
 export function useRooms() {

@@ -10,12 +10,8 @@ import type { ActiveRoom } from "../../types";
 
 defineProps<{
   activeRoom: ActiveRoom;
-  /** 短码是否已注册到解析服务 */
-  shared: boolean;
   /** 是否拿到了完整房间记录（决定能否导出完整码） */
   exportable: boolean;
-  /** 是否已配置解析服务地址 */
-  resolverConfigured: boolean;
 }>();
 
 defineEmits<{ disconnect: [] }>();
@@ -42,25 +38,40 @@ const { status, state } = useTunnel();
         <span class="mono code-value">
           {{ activeRoom.kind === "long" ? "完整码（自包含）" : activeRoom.code }}
         </span>
-        <button
-          v-if="activeRoom.kind === 'short'"
-          class="chip"
-          @click="copyRoomCode(activeRoom.code)"
-        >
+        <button v-if="activeRoom.kind === 'short'" class="chip" @click="copyRoomCode(activeRoom.code)">
           {{ copied ? "已复制" : "复制" }}
         </button>
       </span>
     </InfoRow>
-    <InfoRow v-if="activeRoom.kind === 'short'">
-      <span v-if="shared" class="row-hint">已注册到解析服务，朋友可用这个短码加入。</span>
-      <span v-else class="row-hint">未注册到解析服务，暂时只有本机可解析；发给朋友请用完整房间码。</span>
+    <!-- 注册状态只对房主成立；且只在确实有注册结果时展示，
+         没有数据（已断开/刚启动/加入方）一律不显示，不能拿「失败」当兜底。 -->
+    <InfoRow
+      v-if="
+        activeRoom.role === 'host' &&
+        activeRoom.kind === 'short' &&
+        activeRoom.registration === 'ok'
+      "
+    >
+      <span class="row-hint">已注册到解析服务，朋友可用这个短码加入。</span>
     </InfoRow>
-    <InfoRow v-if="activeRoom.kind === 'short' && !shared && resolverConfigured">
-      <span class="row-hint warn-text">
-        短码没有注册成功（解析服务不可达或地址有误），暂时只有本机可解析。
-      </span>
-    </InfoRow>
-    <InfoRow label="完整房间码" column>
+    <template
+      v-if="
+        activeRoom.role === 'host' &&
+        activeRoom.kind === 'short' &&
+        activeRoom.registration === 'failed'
+      "
+    >
+      <InfoRow>
+        <span class="row-hint">未注册到解析服务，暂时只有本机可解析；发给朋友请用完整房间码。</span>
+      </InfoRow>
+      <InfoRow>
+        <span class="row-hint warn-text">
+          短码没有注册成功（解析服务不可达或地址有误），暂时只有本机可解析。
+        </span>
+      </InfoRow>
+    </template>
+    <!-- 分享完整房间码是房主的事，加入方不展示 -->
+    <InfoRow v-if="activeRoom.role === 'host'" label="完整房间码" column>
       <div class="row-actions">
         <span v-if="longCode" class="row-hint">长度 {{ longCode.length }} 字符</span>
         <button class="chip" :disabled="!exportable" @click="exportLong">导出完整房间码</button>

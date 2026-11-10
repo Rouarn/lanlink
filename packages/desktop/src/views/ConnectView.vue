@@ -10,7 +10,7 @@ import { useTunnel } from "../composables/useTunnel";
 import { activeTab, busy, message } from "../stores/app";
 
 const { room, recent, preview, activeRoom, resetActiveRoom } = useRooms();
-const { configured, resolverUrl } = useSettings();
+const { configured } = useSettings();
 const { status, state, connect, disconnect } = useTunnel();
 
 /** 断开连接：停 core、回到未连接；最近房间记录保留。 */
@@ -38,9 +38,7 @@ async function handleDisconnect(): Promise<void> {
   <ActiveRoomCard
     v-if="activeRoom"
     :active-room="activeRoom"
-    :shared="Boolean(room?.shared)"
     :exportable="Boolean(room)"
-    :resolver-configured="Boolean(resolverUrl)"
     @disconnect="handleDisconnect"
   />
 

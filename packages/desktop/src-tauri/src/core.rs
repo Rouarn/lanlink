@@ -229,6 +229,10 @@ impl Tunnel {
         self.error = None;
         self.hint = None;
         self.retried = false;
+        // 断开即清空本次房间：界面不该再拿到上一轮的房间码/角色/注册结果，
+        // 也就不会把「没有数据」当成「注册失败」继续提示。
+        self.room = None;
+        self.hostname = None;
         self.status()
     }
 
@@ -1054,5 +1058,37 @@ mod tests {
         assert_eq!(fs::metadata(&log).unwrap().len(), 0, "日志文件应被清空");
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// 断开后 status 不能再带本次房间信息：界面据此收起「当前房间」卡片，
+    /// 也就不会因为拿不到注册结果而落到「注册失败」的兜底文案。
+    #[test]
+    fn stop_clears_room_identity() {
+        let mut tunnel = Tunnel::new();
+        // 不碰真实 core：避免测试期间误杀正在运行的 easytier-core。
+        tunnel.core = None;
+        tunnel.log_dir = std::env::temp_dir().join(format!("lanlink-stop-{}", std::process::id()));
+        tunnel.state = State::Connected;
+        tunnel.room = Some(Room {
+            code: "ROOM-8K3M".to_string(),
+            name: "测试房间".to_string(),
+            network: "lanlink-8k3m".to_string(),
+            secret: "secret".to_string(),
+            role: "host".to_string(),
+            relays: vec!["tcp://127.0.0.1:11010".to_string()],
+            kind: "short".to_string(),
+            shared: true,
+            registration: "ok".to_string(),
+            created_at: 0,
+            last_used: 0,
+        });
+        tunnel.hostname = Some("host".to_string());
+
+        let status = tunnel.stop();
+        assert_eq!(status.state, State::Idle);
+        assert!(status.room.is_none(), "断开后不应再报告房间码");
+        assert!(status.room_name.is_none(), "断开后不应再报告房间名");
+        assert!(status.role.is_none(), "断开后不应再报告身份");
+        assert!(status.network.is_none(), "断开后不应再报告网络名");
     }
 }

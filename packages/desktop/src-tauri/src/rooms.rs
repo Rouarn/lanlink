@@ -31,10 +31,19 @@ pub struct Room {
     /// 短码是否已注册到解析服务（可被其他机器解析）
     #[serde(default)]
     pub shared: bool,
+    /// 短码注册结果：`ok` 已注册 / `failed` 尝试过但失败 / `skipped` 没配解析服务，未尝试。
+    /// 界面只用它决定要不要显示注册提示，不能把「没有数据」当成「注册失败」。
+    #[serde(default = "registration_skipped")]
+    pub registration: String,
     #[serde(default)]
     pub created_at: u64,
     #[serde(default)]
     pub last_used: u64,
+}
+
+/// 老版本房间记录没有这个字段，按「未尝试注册」处理，避免误报失败。
+fn registration_skipped() -> String {
+    "skipped".to_string()
 }
 
 const LONG_PREFIX: &str = "LL1.";
@@ -147,6 +156,7 @@ impl RoomCodeResolver for RemoteResolver {
             relays,
             kind: "short".to_string(),
             shared: true,
+            registration: registration_skipped(),
             created_at: 0,
             last_used: now(),
         })
@@ -176,6 +186,7 @@ impl RoomCodeResolver for SelfContainedResolver {
             relays,
             kind: "long".to_string(),
             shared: false,
+            registration: registration_skipped(),
             created_at: 0,
             last_used: now(),
         })
@@ -236,16 +247,20 @@ pub fn create(
         relays,
         kind: "short".to_string(),
         shared: false,
+        registration: registration_skipped(),
         created_at: now(),
         last_used: now(),
     };
 
     if let Some(base) = remote_base.as_deref().filter(|base| !base.is_empty()) {
-        // 注册失败不影响本地建房，只退化成「仅本机可解析」
+        // 注册失败不影响本地建房，只退化成「仅本机可解析」；
+        // 但失败要如实记下来，界面只在 failed 时才提示注册失败。
+        room.registration = "failed".to_string();
         for _ in 0..3 {
             match register(&room, base, token.as_deref()) {
                 Ok(()) => {
                     room.shared = true;
+                    room.registration = "ok".to_string();
                     break;
                 }
                 Err(crate::http::HttpError::Status(409)) => {
@@ -541,22 +556,28 @@ mod tests {
             relays,
             kind: "long".to_string(),
             shared: false,
+            registration: registration_skipped(),
             created_at: 0,
             last_used: 0,
         }
     }
 
+    /// 房间缓存是全局的文件，单测并行跑时串行化，避免互相覆盖。
+    static CACHE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     /// 把房间缓存放进临时目录，避免单测写到真实的用户数据目录。
-    fn isolated_cache() -> PathBuf {
+    fn isolated_cache() -> (PathBuf, std::sync::MutexGuard<'static, ()>) {
+        let guard = CACHE_LOCK.lock().unwrap_or_else(|err| err.into_inner());
         let dir = std::env::temp_dir().join(format!("lanlink-rooms-test-{}", std::process::id()));
         crate::config::set_override(dir.clone(), None);
-        dir
+        let _ = fs::remove_dir_all(&dir);
+        (dir, guard)
     }
 
     /// 全新安装（本地 relays 为空）也要能凭房间码里的中继加入。
     #[test]
     fn join_without_local_relays_uses_record_relays() {
-        isolated_cache();
+        let _cache = isolated_cache();
         let host = sample_room(vec!["tcp://relay.example.com:11010".to_string()]);
         let code = export_long(&host).expect("导出长码");
 
@@ -569,7 +590,7 @@ mod tests {
     /// 只有房间码里真的没有中继时才报缺失，不再提「去配置中继」。
     #[test]
     fn join_reports_missing_relays_in_code() {
-        isolated_cache();
+        let _cache = isolated_cache();
         let host = sample_room(Vec::new());
         let code = export_long(&host).expect("导出长码");
 
@@ -580,7 +601,7 @@ mod tests {
     /// 加入方的房间用记录里的中继，不被本地设置覆盖。
     #[test]
     fn lookup_keeps_record_relays_for_member() {
-        isolated_cache();
+        let _cache = isolated_cache();
         let host = sample_room(vec!["tcp://relay.example.com:11010".to_string()]);
         let code = export_long(&host).expect("导出长码");
         let joined = join(&code, None, None).expect("加入应成功");
@@ -593,6 +614,46 @@ mod tests {
         )
         .expect("缓存命中");
         assert_eq!(again.relays, host.relays);
+    }
+
+    /// 没配解析服务时没有注册动作，不能记成「失败」——界面据此不显示任何注册提示。
+    #[test]
+    fn create_without_resolver_skips_registration() {
+        let _cache = isolated_cache();
+        let room = create(
+            "离线房",
+            vec!["tcp://127.0.0.1:11010".to_string()],
+            None,
+            None,
+        )
+        .expect("创建应成功");
+        assert!(!room.shared);
+        assert_eq!(room.registration, "skipped");
+    }
+
+    /// 配了解析服务但连不上：记 failed，界面才显示「没有注册成功」。
+    #[test]
+    fn create_with_unreachable_resolver_records_failure() {
+        let _cache = isolated_cache();
+        let room = create(
+            "失败房",
+            vec!["tcp://127.0.0.1:11010".to_string()],
+            Some("http://127.0.0.1:1".to_string()),
+            None,
+        )
+        .expect("注册失败不应影响本地建房");
+        assert!(!room.shared);
+        assert_eq!(room.registration, "failed");
+    }
+
+    /// 老版本落盘的房间记录没有 `registration` 字段，读出来按 skipped 处理，不能当成失败。
+    #[test]
+    fn legacy_record_without_registration_is_skipped() {
+        let room: Room = serde_json::from_str(
+            r#"{"code":"ROOM-8K3M","name":"旧记录","network":"lanlink-8k3m","secret":"x","role":"host","relays":[],"kind":"short","shared":true}"#,
+        )
+        .expect("老记录应能读");
+        assert_eq!(room.registration, "skipped");
     }
 
     /// 本地自测：先起服务，再跑
