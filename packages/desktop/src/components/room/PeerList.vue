@@ -16,6 +16,13 @@ defineProps<{
 const { toast } = useApp();
 const copiedIp = ref("");
 
+/** 对端没回报主机名时（Mac 端目前如此）的占位，避免直接拿 IP 当名字 */
+const UNNAMED = "未命名设备";
+
+function displayName(name: string | null | undefined, fallback = UNNAMED): string {
+  return name?.trim() || fallback;
+}
+
 async function copyIp(ip: string): Promise<void> {
   if (!ip) return;
   await copyPlainText(ip);
@@ -40,17 +47,19 @@ async function copyIp(ip: string): Promise<void> {
       <li class="peer-row self">
         <span class="avatar">我</span>
         <span class="peer-main">
-          <span class="peer-name">{{ selfName || "这台电脑" }}</span>
+          <span class="peer-name">{{ displayName(selfName, "这台电脑") }}</span>
           <span class="peer-ip mono">{{ selfIp || "—" }}</span>
         </span>
         <span class="chip">你</span>
       </li>
 
       <li v-for="peer in peers" :key="peer.hostname + peer.ipv4" class="peer-row">
-        <span class="avatar">{{ (peer.hostname || "?").slice(0, 1).toUpperCase() }}</span>
+        <span class="avatar">{{ displayName(peer.hostname).slice(0, 1).toUpperCase() }}</span>
         <span class="peer-main">
-          <span class="peer-name">{{ peer.hostname }}</span>
-          <span class="peer-ip mono">{{ peer.ipv4 }}</span>
+          <span class="peer-name" :class="{ unnamed: !peer.hostname?.trim() }">
+            {{ displayName(peer.hostname) }}
+          </span>
+          <span class="peer-ip mono">{{ peer.ipv4 || "—" }}</span>
         </span>
         <span class="chip" :class="isDirect(peer.cost) ? 'chip-ok' : 'chip-relay'">
           {{ costLabel(peer.cost) }}
@@ -58,7 +67,7 @@ async function copyIp(ip: string): Promise<void> {
         <button
           type="button"
           class="icon-btn"
-          :aria-label="`复制 ${peer.hostname} 的 IP`"
+          :aria-label="`复制 ${displayName(peer.hostname)} 的 IP`"
           @click="copyIp(peer.ipv4)"
         >
           <AppIcon :name="copiedIp === peer.ipv4 ? 'check' : 'copy'" :size="14" />
@@ -131,6 +140,10 @@ async function copyIp(ip: string): Promise<void> {
 .peer-name {
   font-size: var(--text-base);
   font-weight: 600;
+}
+
+.peer-name.unnamed {
+  color: var(--text-2);
 }
 
 .peer-ip {
