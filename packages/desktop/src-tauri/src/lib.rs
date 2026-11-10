@@ -306,6 +306,9 @@ fn request_connect(
     room: Room,
     hostname: Option<String>,
 ) -> Result<Status, String> {
+    // 只在入口算一次：提权转发给别人、自己直接启动 core，两处必须是同一个名字，
+    // 否则对端看到的名称会随「当前实例是不是已经提权」而变。
+    let hostname = effective_hostname(hostname);
     if !elevate::is_elevated() {
         if ELEVATING.swap(true, Ordering::SeqCst) {
             // 上一次授权还没结束，别重复拉起实例
@@ -317,9 +320,7 @@ fn request_connect(
         // 先在普通用户下写入缓存（房主身份等），避免 root 身份创建用户目录文件
         rooms::touch(&room);
 
-        let name = hostname
-            .filter(|name| !name.trim().is_empty())
-            .unwrap_or_else(default_hostname);
+        let name = hostname.unwrap_or_else(default_hostname);
         let mut args = vec![
             "--elevated-run".to_string(),
             "--room".to_string(),
@@ -420,6 +421,20 @@ fn clear_logs(state: State<'_, AppState>) -> Result<(), String> {
 /// 解析服务 Token 是编译进客户端的内置常量，所有远端请求统一携带。
 fn resolver_token() -> Option<String> {
     Some(settings::RESOLVER_TOKEN.to_string())
+}
+
+/// 决定传给 EasyTier 的 `--hostname`。
+///
+/// - 命令行显式带 `--hostname`（提权转发）时以它为准，只做去空白；
+/// - 否则 macOS 取用户可读的设备名（`config::device_name`），
+///   避免把 `gethostname()` 返回的 DHCP IP（本机实测就是 `192.168.31.115`）
+///   当成主机名，导致对端列表里只显示 IP；
+/// - Windows 保持原状：返回 `None`，由 EasyTier 自己取系统计算机名（`Redmi-G-Pro`）。
+fn effective_hostname(hostname: Option<String>) -> Option<String> {
+    hostname
+        .map(|name| name.trim().to_string())
+        .filter(|name| !name.is_empty())
+        .or_else(config::device_name)
 }
 
 fn default_hostname() -> String {

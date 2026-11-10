@@ -138,6 +138,85 @@ pub fn hand_back(path: &Path) {
 }
 
 // ---------------------------------------------------------------------------
+// 设备名
+// ---------------------------------------------------------------------------
+
+/// 传给 EasyTier 的本机显示名（对端列表里看到的名字）。
+///
+/// macOS 上 `gethostname()` 往往不是用户认得的设备名：本机实测返回的是 DHCP 分配的
+/// IP（`192.168.31.115`），直接交给 core 当 `--hostname`，对端就只看到一串 IP。
+/// 系统里真正显示给用户的是 `scutil --get ComputerName`（如 `MacBook Air`），
+/// 其次是 `LocalHostName`（如 `MacBook-Air`），最后才退回 `gethostname()`。
+/// 全部拿不到返回 `None`，由调用方决定默认值。
+///
+/// Windows 保持原状：返回 `None`，仍由 EasyTier 自己取系统计算机名（如 `Redmi-G-Pro`）。
+pub fn device_name() -> Option<String> {
+    #[cfg(target_os = "macos")]
+    {
+        pick_device_name(
+            scutil_name("ComputerName"),
+            scutil_name("LocalHostName"),
+            gethostname(),
+        )
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        None
+    }
+}
+
+/// 按优先级取第一个可用名字：ComputerName → LocalHostName → gethostname。
+///
+/// 拆成纯函数，优先级顺序可以直接测，不依赖本机 scutil 的实际配置。
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn pick_device_name(
+    computer: Option<String>,
+    local: Option<String>,
+    host: Option<String>,
+) -> Option<String> {
+    [computer, local, host]
+        .into_iter()
+        .flatten()
+        .map(|name| name.trim().to_string())
+        .find(|name| !name.is_empty())
+}
+
+/// 读 `scutil --get <key>`；未设置时 scutil 以非零码退出，视为没有这个名字。
+#[cfg(target_os = "macos")]
+fn scutil_name(key: &str) -> Option<String> {
+    let mut cmd = crate::proc::command("scutil");
+    cmd.arg("--get").arg(key);
+    // scutil 正常是毫秒级；给它一个上限，避免异常时卡住连接流程
+    let output = crate::proc::run_with_timeout(cmd, std::time::Duration::from_secs(2)).ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    clean_name(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// `gethostname(2)`：前两级都拿不到时的兜底，可能是 `Mac.lan` 甚至一串 IP。
+#[cfg(target_os = "macos")]
+fn gethostname() -> Option<String> {
+    let mut buf = [0 as libc::c_char; 256];
+    let code = unsafe { libc::gethostname(buf.as_mut_ptr(), buf.len()) };
+    if code != 0 {
+        return None;
+    }
+    let raw = unsafe { std::ffi::CStr::from_ptr(buf.as_ptr()) };
+    clean_name(&raw.to_string_lossy())
+}
+
+/// 去掉首尾空白；空串与 `scutil` 的 `Key: not set` 提示都视为没有名字。
+#[cfg(target_os = "macos")]
+fn clean_name(raw: &str) -> Option<String> {
+    let name = raw.trim();
+    if name.is_empty() || name.ends_with(": not set") {
+        return None;
+    }
+    Some(name.to_string())
+}
+
+// ---------------------------------------------------------------------------
 // 日志与文件写入
 // ---------------------------------------------------------------------------
 
@@ -280,5 +359,55 @@ mod tests {
         assert_eq!(entries, 1, "目录里只应剩下目标文件");
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// 设备名优先级：ComputerName 最优先，其次是 LocalHostName，最后才是 gethostname。
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn device_name_prefers_computer_name() {
+        let name = super::pick_device_name(
+            Some("MacBook Air".to_string()),
+            Some("MacBook-Air".to_string()),
+            Some("192.168.31.115".to_string()),
+        );
+        assert_eq!(name.as_deref(), Some("MacBook Air"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn device_name_falls_back_to_local_hostname() {
+        let name = super::pick_device_name(
+            None,
+            Some("MacBook-Air".to_string()),
+            Some("192.168.31.115".to_string()),
+        );
+        assert_eq!(name.as_deref(), Some("MacBook-Air"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn device_name_falls_back_to_gethostname() {
+        let name = super::pick_device_name(None, None, Some("Mac.lan".to_string()));
+        assert_eq!(name.as_deref(), Some("Mac.lan"));
+    }
+
+    /// 三级都拿不到时返回 None，交给调用方用默认名（不能把空串当成名字）。
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn device_name_is_none_when_all_sources_fail() {
+        assert_eq!(super::pick_device_name(None, None, None), None);
+        assert_eq!(
+            super::pick_device_name(Some(String::new()), None, None),
+            None
+        );
+    }
+
+    /// scutil 的输出要能处理首尾空白与「未设置」提示行。
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn clean_name_trims_and_rejects_placeholder() {
+        assert_eq!(super::clean_name("  MacBook Air\n").as_deref(), Some("MacBook Air"));
+        assert_eq!(super::clean_name("   "), None);
+        assert_eq!(super::clean_name("HostName: not set"), None);
     }
 }
