@@ -1,11 +1,11 @@
 name: Build installers
 
-# 自用构建：手动触发，或打 v* 标签时自动跑。
-# 产物统一改名成「LanLink-<版本>-<平台>-<架构>.<后缀>」，避免同名混淆。
+# 只在打版本标签（v0.1.1 这种）时自动构建并出安装包；普通提交不会触发流水线。
+# workflow_dispatch 只用于临时手动出包（没有标签时，版本取仓库里 tauri.conf.json 的值）。
 on:
-  workflow_dispatch:
   push:
     tags: ["v*"]
+  workflow_dispatch:
 
 concurrency:
   group: installers-${{ github.ref }}
@@ -32,21 +32,21 @@ jobs:
             platform_dir: macos-arm64
             easytier_asset: easytier-macos-aarch64-v2.6.4.zip
             bundles: app,dmg
-            artifact: LanLink-0.1.0-macos-arm64.dmg
+            suffix: macos-arm64.dmg
           - name: macos-x64
             os: macos-15-intel
             target: x86_64-apple-darwin
             platform_dir: macos-x64
             easytier_asset: easytier-macos-x86_64-v2.6.4.zip
             bundles: app,dmg
-            artifact: LanLink-0.1.0-macos-x64.dmg
+            suffix: macos-x64.dmg
           - name: windows-x64
             os: windows-latest
             target: x86_64-pc-windows-msvc
             platform_dir: windows-x64
             easytier_asset: easytier-windows-x86_64-v2.6.4.zip
             bundles: nsis
-            artifact: LanLink-0.1.0-windows-x64-setup.exe
+            suffix: windows-x64-setup.exe
 
     steps:
       - uses: actions/checkout@v4
@@ -58,6 +58,32 @@ jobs:
         with:
           node-version: 24
           cache: pnpm
+
+      - name: Resolve version from tag
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+            if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+ ]]; then
+              echo "标签必须形如 v0.1.1，当前是 ${GITHUB_REF_NAME}" >&2
+              exit 1
+            fi
+          else
+            # 手动触发：沿用仓库里的版本
+            VERSION=$(node -p "require('./packages/desktop/src-tauri/tauri.conf.json').version")
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "本次构建版本：$VERSION"
+
+      - name: Sync version into tauri.conf.json
+        # 让 app / dmg / 安装包的版本与标签一致。只改 runner 上的工作区，不提交回仓库。
+        shell: bash
+        run: |
+          set -euo pipefail
+          node -e "const fs=require('fs');const p='packages/desktop/src-tauri/tauri.conf.json';const c=JSON.parse(fs.readFileSync(p,'utf8'));c.version=process.argv[1];fs.writeFileSync(p,JSON.stringify(c,null,2)+'\n')" "${{ steps.version.outputs.version }}"
+          node -p "require('./packages/desktop/src-tauri/tauri.conf.json').version"
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -115,27 +141,34 @@ jobs:
       - name: Rename macOS installer
         if: runner.os == 'macOS'
         shell: bash
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
           set -euo pipefail
-          src="packages/desktop/src-tauri/target/${{ matrix.target }}/release/bundle/dmg/${{ matrix.artifact }}"
+          name="LanLink-${VERSION}-${{ matrix.suffix }}"
+          dir="packages/desktop/src-tauri/target/${{ matrix.target }}/release/bundle/dmg"
+          src="$dir/$name"
           if [ ! -f "$src" ]; then
-            src=$(find "packages/desktop/src-tauri/target/${{ matrix.target }}/release/bundle/dmg" -name "*.dmg" -type f | head -n 1)
+            src=$(find "$dir" -name "*.dmg" -type f | head -n 1)
           fi
-          mv "$src" "${{ matrix.artifact }}"
-          ls -lh "${{ matrix.artifact }}"
+          mv "$src" "$name"
+          ls -lh "$name"
 
       - name: Rename Windows installer
         if: runner.os == 'Windows'
         shell: pwsh
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
+          $name = "LanLink-$env:VERSION-${{ matrix.suffix }}"
           $src = Get-ChildItem "packages/desktop/src-tauri/target/${{ matrix.target }}/release/bundle/nsis/*-setup.exe" | Select-Object -First 1
-          Move-Item $src.FullName "${{ matrix.artifact }}"
-          Get-Item "${{ matrix.artifact }}" | Format-List Name, Length
+          Move-Item $src.FullName $name
+          Get-Item $name | Format-List Name, Length
 
       - name: Upload installer
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.artifact }}
-          path: ${{ matrix.artifact }}
+          name: LanLink-${{ steps.version.outputs.version }}-${{ matrix.suffix }}
+          path: LanLink-${{ steps.version.outputs.version }}-${{ matrix.suffix }}
           if-no-files-found: error
           retention-days: 14

@@ -58,13 +58,37 @@ pnpm install
 
 ## 构建安装包（GitHub Actions）
 
-`.github/workflows/build.yml` 在 Actions 页面手动触发（`workflow_dispatch`），或推 `v*` 标签时自动跑：
+`.github/workflows/build.yml` **只在打版本标签时自动构建出包**，普通提交不会触发流水线：
 
-| 平台 | 构建机 / 目标 | 产物文件名 |
+| 平台 | 构建机 / 目标 | 产物文件名（`<version>` 取自标签） |
 | --- | --- | --- |
-| macOS arm64 | `macos-latest` / `aarch64-apple-darwin` | `LanLink-0.1.0-macos-arm64.dmg` |
-| macOS x64 | `macos-15-intel` / `x86_64-apple-darwin` | `LanLink-0.1.0-macos-x64.dmg` |
-| Windows x64 | `windows-latest` / `x86_64-pc-windows-msvc` | `LanLink-0.1.0-windows-x64-setup.exe` |
+| macOS arm64 | `macos-latest` / `aarch64-apple-darwin` | `LanLink-<version>-macos-arm64.dmg` |
+| macOS x64 | `macos-15-intel` / `x86_64-apple-darwin` | `LanLink-<version>-macos-x64.dmg` |
+| Windows x64 | `windows-latest` / `x86_64-pc-windows-msvc` | `LanLink-<version>-windows-x64-setup.exe` |
+
+### 怎么发一版
+
+```bash
+# 1. 确保要发的代码已经在 main 上
+git checkout main && git pull
+
+# 2. 打标签（形如 v0.1.1，必须匹配 v* 才会触发）
+git tag v0.1.1
+
+# 3. 推标签（两个远端都要推，CI 跑在 GitHub 上）
+git push origin v0.1.1
+git push github v0.1.1
+```
+
+推送标签后 GitHub Actions 会自动跑三个平台的构建，产物在**对应那次运行的 Artifacts** 里
+（Actions → 选带 `v0.1.1` 标签的那次运行 → 页面底部 Artifacts），三个文件分别下载，保留 14 天。
+
+版本号不用手动改 `tauri.conf.json`：工作流会从标签名去掉 `v` 得到版本号，
+在构建前写进 runner 工作区的 `packages/desktop/src-tauri/tauri.conf.json`
+（不提交回仓库），所以 app / dmg / 安装包内部的版本、以及产物文件名都与标签一致。
+
+需要临时出包（不想打标签）时，可以在 Actions 页面手动触发 `workflow_dispatch`：
+此时版本取仓库里 `tauri.conf.json` 的当前值。手动触发不属于「提交触发」，不影响上面的约定。
 
 - easytier 二进制不进仓库，workflow 会按上表平台从 EasyTier 官方 release 下载
   （`easytier-macos-aarch64-v2.6.4.zip`、`easytier-macos-x86_64-v2.6.4.zip`、
