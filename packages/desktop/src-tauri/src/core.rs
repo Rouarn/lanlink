@@ -5,6 +5,7 @@
 //!
 //! 连接状态机：idle → connecting → connected，异常时进入 failed 或 reconnecting。
 
+use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom};
 use std::net::{Ipv4Addr, SocketAddr, TcpStream};
@@ -17,6 +18,7 @@ use serde::Serialize;
 
 use crate::broadcast;
 use crate::config;
+use crate::games;
 use crate::lan;
 use crate::proc;
 use crate::rooms::Room;
@@ -91,6 +93,28 @@ pub struct Status {
     pub lan_relay: bool,
     /// 中继启动/运行失败的原因
     pub lan_error: Option<String>,
+    /// 房间内「开放游戏」列表（本机 + 对端）
+    pub open_games: Vec<OpenGame>,
+    /// 开放游戏宣告通道是否正在运行
+    pub games_relay: bool,
+    /// 宣告通道启动/运行失败的原因
+    pub games_error: Option<String>,
+}
+
+/// 房间内一条可复制的开放游戏地址。
+#[derive(Debug, Clone, Serialize)]
+pub struct OpenGame {
+    /// 游戏名或《我的世界》世界名
+    pub name: String,
+    /// 开游戏的人（房间内设备名）
+    pub hostname: String,
+    /// 端点 IP：对端用真实源 IP，本机用虚拟 IP
+    pub ipv4: String,
+    pub port: u16,
+    /// `minecraft` / `manual` / 空字符串
+    pub source: String,
+    /// 是否本机开放
+    pub mine: bool,
 }
 
 impl Default for State {
@@ -133,6 +157,9 @@ pub struct Tunnel {
     error: Option<String>,
     hint: Option<String>,
     retried: bool,
+    /// 本次 spawn core 之前的日志文件长度：判断退出原因时只解析这之后新写入的内容，
+    /// 避免上一次会话残留的旧行（例如旧的端口冲突）误导结论。
+    log_mark: u64,
     /// 《我的世界》局域网发现中继：只在房间连上期间存在
     lan: Option<lan::LanRelay>,
     lan_enabled: bool,
@@ -156,12 +183,19 @@ pub struct Tunnel {
     bc: Option<broadcast::BroadcastRelay>,
     broadcast_ports: Vec<u16>,
     bc_retry_at: Option<Instant>,
+    /// 房间内「开放游戏」宣告：只在房间连上期间存在，和局域网发现开关无关
+    games: Option<games::GameRelay>,
+    games_error: Option<String>,
+    games_retry_at: Option<Instant>,
+    /// 本机开放游戏表（自动发现 + 手动登记），由 lan 中继与设置命令共同维护
+    local_games: games::LocalGames,
 }
 
 impl Tunnel {
     pub fn new() -> Self {
         let log_dir = config::log_dir();
         let _ = config::create_private_dir(&log_dir);
+        let settings = Settings::load();
         let (core, cli) = resolve_binaries();
         match &core {
             Some(path) => eprintln!("[lanlink] easytier-core: {}", path.display()),
@@ -179,8 +213,9 @@ impl Tunnel {
             error: None,
             hint: None,
             retried: false,
+            log_mark: 0,
             lan: None,
-            lan_enabled: Settings::load().lan_discovery,
+            lan_enabled: settings.lan_discovery,
             lan_error: None,
             lan_retry_at: None,
             node_cache: None,
@@ -190,8 +225,14 @@ impl Tunnel {
             peer_cache: None,
             peer_at: None,
             bc: None,
-            broadcast_ports: broadcast::normalize_ports(&Settings::load().broadcast_ports),
+            broadcast_ports: broadcast::normalize_ports(&settings.broadcast_ports),
             bc_retry_at: None,
+            games: None,
+            games_error: None,
+            games_retry_at: None,
+            local_games: Arc::new(Mutex::new(games::LocalGamesState::with_manual(
+                settings.manual_games.clone(),
+            ))),
         };
         // 上次以 root 运行留下的日志文件：这次启动就顺手把权限与属主打回登录用户
         tunnel.secure_log_permissions();
@@ -239,8 +280,16 @@ impl Tunnel {
 
     /// 加入房间。端口仍被上次残留的 core 占用时，先清理再启动。
     pub fn start(&mut self, room: Room, hostname: Option<String>) -> Status {
+        // 已有 core 在跑：连接中的直接回报状态；失败残留的先收掉再重启，
+        // 否则「再试一次」只会永远返回同一个失败状态（等于按钮没反应）。
         if self.child.is_some() {
-            return self.status();
+            if matches!(
+                self.state,
+                State::Connecting | State::Reconnecting | State::Connected
+            ) {
+                return self.status();
+            }
+            self.stop();
         }
 
         let Some(core) = self.core.clone() else {
@@ -259,6 +308,10 @@ impl Tunnel {
         self.retried = false;
         self.lan_error = None;
         self.lan_retry_at = None;
+        self.games = None;
+        self.games_error = None;
+        self.games_retry_at = None;
+        self.local_games.lock().unwrap().clear_minecraft();
         self.node_cache = None;
         self.peer_cache = None;
         self.peer_at = None;
@@ -284,14 +337,40 @@ impl Tunnel {
             self.state = State::Failed;
             self.error = Some(format!("启动 core 失败：{err}"));
             self.hint = Some("请确认内置的 easytier-core 有可执行权限。".to_string());
+        } else {
+            // 缺 DLL / 架构不匹配这类失败发生在加载阶段，进程会立刻退出。
+            // 先在本地观察一小会儿，让第一次返回的状态就带上真实原因，
+            // 而不是前端先看到「连接中」、再白等一轮轮询与 CLI 探测。
+            self.wait_quick_exit();
         }
         self.status()
+    }
+
+    /// 启动后短暂观察子进程，捕捉加载阶段就退出的情况（缺 DLL、架构不匹配等）。
+    /// 最多等 300ms，正常启动不受影响。
+    fn wait_quick_exit(&mut self) {
+        const QUICK_EXIT_WINDOW: Duration = Duration::from_millis(300);
+        let started = Instant::now();
+        while started.elapsed() < QUICK_EXIT_WINDOW {
+            let exited = match self.child.as_mut() {
+                Some(child) => !matches!(child.try_wait(), Ok(None)),
+                None => true,
+            };
+            if exited {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 
     pub fn stop(&mut self) -> Status {
         // 先停中继：断开房间后要立刻停播并关掉本地转发端口
         self.lan = None;
         self.bc = None;
+        self.games = None;
+        self.games_error = None;
+        self.games_retry_at = None;
+        self.local_games.lock().unwrap().clear_minecraft();
         self.node_cache = None;
         // 对端快照属于上一次会话，不能带到下一次连接
         self.peer_cache = None;
@@ -350,13 +429,19 @@ impl Tunnel {
         if let Some(code) = exit_code {
             self.child = None;
             self.node_cache = None;
-            let code = code.map(|c| c.to_string()).unwrap_or_else(|| "signal".to_string());
+            let (message, exit_hint) = describe_exit(code);
             self.state = State::Failed;
-            self.error = Some(format!("core 进程已退出（状态码 {code}）"));
-            let hint = hint_from_log(&self.tail_log());
-            self.hint = hint.as_ref().map(|hint| hint.text.clone());
+            self.error = Some(message);
+            // 只解析本次 spawn 之后新写入的日志：加载期秒退时本次一行都没有，
+            // 读旧行会把上一次会话的端口冲突之类误当成本次原因。
+            let log_hint = hint_from_log(&self.tail_log_from(Some(self.log_mark)));
+            self.hint = exit_hint
+                .map(str::to_string)
+                .or_else(|| log_hint.as_ref().map(|hint| hint.text.clone()));
 
-            let port_conflict = hint.map(|hint| hint.kind == HintKind::PortConflict).unwrap_or(false);
+            let port_conflict = log_hint
+                .map(|hint| hint.kind == HintKind::PortConflict)
+                .unwrap_or(false);
             if port_conflict && !self.retried {
                 self.retried = true;
                 self.state = State::Reconnecting;
@@ -461,6 +546,14 @@ impl Tunnel {
             .clone()
             .or_else(|| self.lan.as_ref().and_then(|relay| relay.warning()));
 
+        // 4.1 房间内开放游戏：与局域网发现开关无关，连上就跑（手动登记也能用）
+        self.sync_games();
+        status.games_relay = self.games.is_some();
+        status.games_error = self
+            .games_error
+            .clone()
+            .or_else(|| self.games.as_ref().and_then(|relay| relay.error()));
+
         status.state = self.state;
         status.error = self.error.clone();
         status.hint = self.hint.clone();
@@ -468,6 +561,7 @@ impl Tunnel {
         status.room_name = self.room.as_ref().map(|room| room.name.clone());
         status.role = self.room.as_ref().map(|room| room.role.clone());
         status.network = self.room.as_ref().map(|room| room.network.clone());
+        status.open_games = self.open_games(&status);
         status
     }
 
@@ -552,6 +646,129 @@ impl Tunnel {
         self.status()
     }
 
+    /// 设置「开放游戏」手动登记表，下一次宣告周期生效。
+    pub fn set_manual_games(&mut self, games: Vec<games::ManualGame>) -> Status {
+        self.local_games.lock().unwrap().set_manual(games);
+        self.status()
+    }
+
+    /// 让开放游戏宣告通道跟上连接状态：连上即启动，断开即停。
+    fn sync_games(&mut self) {
+        let connected = self.state == State::Connected && self.room.is_some();
+        if !connected {
+            self.games = None;
+            self.games_error = None;
+            self.games_retry_at = None;
+            return;
+        }
+
+        if self
+            .games
+            .as_ref()
+            .map(|relay| relay.alive())
+            .unwrap_or(false)
+        {
+            self.games_error = None;
+            return;
+        }
+
+        if let Some(relay) = self.games.take() {
+            self.games_error = relay.error();
+            if self.games_error.is_some() {
+                self.games_retry_at = Some(Instant::now() + LAN_RETRY_INTERVAL);
+            }
+        }
+        let cooling = self
+            .games_retry_at
+            .map(|at| Instant::now() < at)
+            .unwrap_or(false);
+        if cooling {
+            return;
+        }
+
+        let Some(network) = self.room.as_ref().map(|room| room.network.clone()) else {
+            return;
+        };
+        match games::GameRelay::start(
+            network,
+            self.log_path(),
+            self.peer_ips.clone(),
+            self.local_games.clone(),
+        ) {
+            Ok(relay) => {
+                self.games = Some(relay);
+                self.games_error = None;
+                self.games_retry_at = None;
+            }
+            Err(err) => {
+                eprintln!("[lanlink] 开放游戏宣告启动失败：{err}");
+                self.note(
+                    "WARN",
+                    &format!(
+                        "开放游戏宣告启动失败：{err}（{} 秒后重试）",
+                        LAN_RETRY_INTERVAL.as_secs()
+                    ),
+                );
+                self.games_error = Some(err);
+                self.games_retry_at = Some(Instant::now() + LAN_RETRY_INTERVAL);
+            }
+        }
+    }
+
+    /// 组装房间内开放游戏列表：本机在前，对端按 IP + 端口排序。
+    ///
+    /// 端点 IP 对远端一律取真实源地址（`games::RemoteGameSnapshot::ip`），
+    /// 与报文里可能出现的任何地址声明无关。
+    fn open_games(&self, status: &Status) -> Vec<OpenGame> {
+        // 宣告通道没起来时，本机游戏并没有真正播出去，不能假装「已开放」
+        let Some(relay) = &self.games else {
+            return Vec::new();
+        };
+
+        let mut games = Vec::new();
+        if let Some(ipv4) = status.ipv4.as_deref().filter(|ip| !ip.is_empty()) {
+            let hostname = status
+                .hostname
+                .as_deref()
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .unwrap_or("这台电脑");
+            for game in self.local_games.lock().unwrap().snapshot() {
+                games.push(OpenGame {
+                    name: game.name,
+                    hostname: hostname.to_string(),
+                    ipv4: ipv4.to_string(),
+                    port: game.port,
+                    source: game.source,
+                    mine: true,
+                });
+            }
+        }
+
+        let names: HashMap<&str, &str> = status
+            .peers
+            .iter()
+            .map(|peer| (peer.ipv4.as_str(), peer.hostname.as_str()))
+            .collect();
+        for game in relay.snapshot() {
+            let ipv4 = game.ip.to_string();
+            let hostname = names
+                .get(ipv4.as_str())
+                .map(|name| name.trim())
+                .filter(|name| !name.is_empty() && *name != "未知节点")
+                .unwrap_or("未命名设备");
+            games.push(OpenGame {
+                name: game.name,
+                hostname: hostname.to_string(),
+                ipv4,
+                port: game.port,
+                source: game.source,
+                mine: false,
+            });
+        }
+        games
+    }
+
     /// 让中继跟上连接状态：连上才启动，断开/关闭开关时立即停。
     fn sync_lan(&mut self) {
         let connected = self.state == State::Connected && self.room.is_some();
@@ -579,6 +796,7 @@ impl Tunnel {
                             name,
                             self.log_path(),
                             self.peer_ips.clone(),
+                            self.local_games.clone(),
                         ) {
                             Ok(relay) => {
                                 self.lan = Some(relay);
@@ -745,6 +963,8 @@ impl Tunnel {
             .stdout(Stdio::from(log))
             .stderr(Stdio::from(log_err));
 
+        // 记下 spawn 前的日志长度：本次的退出原因只看这之后新写入的内容
+        self.log_mark = fs::metadata(&log_path).map(|meta| meta.len()).unwrap_or(0);
         let child = cmd.spawn().map_err(|err| err.to_string())?;
         let pid = child.id();
         self.child = Some(child);
@@ -858,13 +1078,24 @@ impl Tunnel {
     }
 
     fn tail_log(&self) -> Vec<String> {
+        self.tail_log_from(None)
+    }
+
+    /// 读取日志尾部；`from` 有值时只读取该偏移之后写入的内容（本次 spawn 之后）。
+    fn tail_log_from(&self, from: Option<u64>) -> Vec<String> {
         let path = self.log_path();
         let Ok(mut file) = File::open(&path) else {
             return Vec::new();
         };
         let len = file.metadata().map(|m| m.len()).unwrap_or(0);
-        if len > LOG_TAIL_BYTES {
-            let _ = file.seek(SeekFrom::Start(len - LOG_TAIL_BYTES));
+        let tail_start = len.saturating_sub(LOG_TAIL_BYTES);
+        let start = match from {
+            Some(offset) if offset >= len => return Vec::new(),
+            Some(offset) if offset > tail_start => offset,
+            _ => tail_start,
+        };
+        if start > 0 {
+            let _ = file.seek(SeekFrom::Start(start));
         }
         let mut buf = Vec::new();
         let _ = file.read_to_end(&mut buf);
@@ -1186,6 +1417,33 @@ fn blocker_message(holders: &[PortHolder]) -> String {
         }
     }
     items.join("；")
+}
+
+/// 把子进程退出码翻译成给人看的原因。返回 (错误文案, 额外提示)。
+///
+/// 原始状态码始终保留在文案里（界面「技术信息」直接展示这段），
+/// 方便排查时对照 Windows NTSTATUS。
+fn describe_exit(code: Option<i32>) -> (String, Option<&'static str>) {
+    const RUNTIME_HINT: &str =
+        "网络组件缺少运行库，通常是安装包不完整：请重新安装最新版本；若仍失败，把这条技术信息发给开发者。";
+    let Some(raw) = code else {
+        return ("core 进程已退出（状态码 signal）".to_string(), None);
+    };
+    let (reason, hint) = match raw as u32 {
+        0xC0000135 => ("核心缺少运行库，无法启动", Some(RUNTIME_HINT)),
+        0xC0000139 => ("核心依赖的运行库版本不匹配，无法启动", Some(RUNTIME_HINT)),
+        0xC000007B => (
+            "核心文件损坏或架构不匹配，无法启动",
+            Some("安装包可能不完整或被安全软件拦截：请重新安装最新版本。"),
+        ),
+        0xC0000142 => ("核心运行库初始化失败，无法启动", Some(RUNTIME_HINT)),
+        0xC0000005 => ("核心启动时崩溃（访问违例）", None),
+        _ => return (format!("core 进程已退出（状态码 {raw}）"), None),
+    };
+    (
+        format!("{reason}（状态码 {raw} / 0x{:08X}）", raw as u32),
+        hint,
+    )
 }
 
 /// 从日志尾部归纳出可读的失败原因。
@@ -1590,5 +1848,44 @@ mod tests {
         assert!(status.room_name.is_none(), "断开后不应再报告房间名");
         assert!(status.role.is_none(), "断开后不应再报告身份");
         assert!(status.network.is_none(), "断开后不应再报告网络名");
+    }
+
+    /// 缺 DLL 的退出码要翻译成人话，同时保留原始码给「技术信息」。
+    #[test]
+    fn describe_exit_maps_missing_runtime_dll() {
+        let (message, hint) = describe_exit(Some(-1073741515));
+        assert!(message.contains("缺少运行库"), "应指出缺少运行库：{message}");
+        assert!(message.contains("0xC0000135"), "应保留原始状态码：{message}");
+        assert!(hint.unwrap_or_default().contains("重新安装"));
+
+        // 未知退出码保持原来的技术文案，不能吞掉状态码。
+        let (other, other_hint) = describe_exit(Some(1));
+        assert!(other.contains("状态码 1"));
+        assert!(other_hint.is_none());
+    }
+
+    /// 退出原因只看本次 spawn 之后新写入的日志，旧会话的端口冲突不能算到本次头上。
+    #[test]
+    fn tail_log_from_ignores_previous_session() {
+        let dir = std::env::temp_dir().join(format!("lanlink-log-mark-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let log = dir.join("core.log");
+        fs::write(&log, "error: address already in use\n").unwrap();
+
+        let mut tunnel = Tunnel::new();
+        tunnel.log_dir = dir.clone();
+        tunnel.log_mark = fs::metadata(&log).unwrap().len();
+
+        assert!(
+            tunnel.tail_log_from(Some(tunnel.log_mark)).is_empty(),
+            "本次还没写日志时不应读到上一次会话的旧行"
+        );
+
+        fs::write(&log, "error: address already in use\n新一行\n").unwrap();
+        let lines = tunnel.tail_log_from(Some(tunnel.log_mark));
+        assert_eq!(lines, vec!["新一行".to_string()]);
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }

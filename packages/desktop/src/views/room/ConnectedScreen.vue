@@ -6,6 +6,7 @@ import { useRooms } from "../../stores/rooms";
 import { useCopyFeedback } from "../../composables/useClipboard";
 import { roleLabel, shortCode } from "../../lib/labels";
 import AddressCard from "../../components/room/AddressCard.vue";
+import OpenGamesCard from "../../components/room/OpenGamesCard.vue";
 import LanAssistant from "../../components/room/LanAssistant.vue";
 import PeerList from "../../components/room/PeerList.vue";
 import LongCodeModal from "../../components/room/LongCodeModal.vue";
@@ -85,6 +86,8 @@ async function leave(): Promise<void> {
     </header>
 
     <AddressCard :ip="status?.ipv4 ?? null" @why="whyOpen = true" />
+
+    <OpenGamesCard />
 
     <LanAssistant />
 

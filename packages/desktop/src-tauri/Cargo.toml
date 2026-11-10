@@ -1,6 +1,6 @@
 [package]
 name = "lanlink"
-version = "0.1.0"
+version = "0.1.1"
 description = "LanLink 内置 EasyTier 核心的一键联机客户端"
 edition = "2021"
 rust-version = "1.77"
@@ -22,13 +22,17 @@ flate2 = "1"
 # 用 ring 后端（不用默认的 aws-lc-rs），避免构建期依赖 cmake / nasm，体积也更小。
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 webpki-roots = "0.26"
-# 局域网发现：组播 socket 的 reuse/join/loop 选项，以及本机网卡枚举
-socket2 = "0.6"
+# 局域网发现：组播 socket 的 reuse/join/loop 选项，以及本机网卡枚举。
+# mac 上要与原版客户端共享 4445，必须能开 SO_REUSEPORT（在 socket2 的 all 特性里）。
+socket2 = { version = "0.6", features = ["all"] }
 if-addrs = "0.15"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 libc = "0.2"
 security-framework-sys = "2.9.0"
+
+[target.'cfg(target_os = "android")'.dependencies]
+libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
 # 提权：OpenProcessToken/GetTokenInformation 判断管理员，ShellExecuteExW + runas 重开自身

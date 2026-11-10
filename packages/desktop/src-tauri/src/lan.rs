@@ -16,6 +16,8 @@
 //!    `[MOTD]<motd>[/MOTD][AD]<端口>[/AD]`（UTF-8，约每 1.5 秒一次）。
 //!    报文里**没有 IP**，原版客户端用的是 UDP 源地址；本机只认源地址属于本机网卡的公告，
 //!    避免把物理局域网里邻居的世界当成自己的。超过 5 秒没再收到视为世界已关闭。
+//!    监听 socket 绑 `0.0.0.0:4445` 并开 `SO_REUSEPORT`，再逐网卡加入组播组——
+//!    绑具体网卡地址在 macOS 上收不到组播，不开 `SO_REUSEPORT` 则与原版客户端互相挤占端口。
 //! 2. **同步**：把「本机世界端口 + MOTD」通过虚拟网内的 UDP 心跳（`4448`）告诉房间成员。
 //!    这项同步是本项目补充的最小协议——EasyTier 只提供节点/对端信息，没有应用层数据通道；
 //!    报文是 `{"lanlink":1,"worlds":[{"port":25565,"motd":"..."}]}`，每个成员只会发给
@@ -53,6 +55,8 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use socket2::{Domain, Protocol, Socket, Type};
+
+use crate::games::LocalGames;
 
 /// 原版局域网发现的组播地址（IPv4）。
 pub const MC_GROUP: Ipv4Addr = Ipv4Addr::new(224, 0, 2, 60);
@@ -239,12 +243,19 @@ pub(crate) fn local_ipv4s() -> Vec<Ipv4Addr> {
     ips
 }
 
-/// 绑定 `ip:4445` 并加入组播组。每个网卡一个 socket，原版按网卡播公告。
-fn bind_receiver(ip: Ipv4Addr) -> io::Result<UdpSocket> {
+/// 绑定 `0.0.0.0:4445`（组播组在各网卡上另行加入）。
+///
+/// 为什么绑通配地址而不是各网卡地址：macOS 上绑到具体地址的 socket 收不到目的地址
+/// 是组播的报文（实测绑 `192.168.x.x:4445` 一条也收不到，绑 `0.0.0.0:4445` 正常）。
+/// 为什么还要 `SO_REUSEPORT`：macOS 只认 `SO_REUSEPORT` 共享监听端口；原版客户端的
+/// `MulticastSocket` 同样开了它，两边才能同时监听 4445。否则先绑定的一方会把对方挤掉，
+/// 原版日志里会出现 `Unable to start LAN server detection`，且我们自己也收不到公告。
+fn bind_receiver() -> io::Result<UdpSocket> {
     let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
     socket.set_reuse_address(true)?;
-    socket.bind(&SocketAddr::from((ip, MC_PORT)).into())?;
-    socket.join_multicast_v4(&MC_GROUP, &ip)?;
+    #[cfg(unix)]
+    socket.set_reuse_port(true)?;
+    socket.bind(&SocketAddr::from((Ipv4Addr::UNSPECIFIED, MC_PORT)).into())?;
     let socket: UdpSocket = socket.into();
     socket.set_read_timeout(Some(TICK))?;
     Ok(socket)
@@ -412,6 +423,8 @@ struct Shared {
     announce: Mutex<Vec<Announcement>>,
     /// 对端虚拟 IP：由 `core` 统一轮询 `easytier-cli peer` 后写入，中继自己不再起子进程
     peers: Arc<Mutex<Vec<Ipv4Addr>>>,
+    /// 本机游戏表：把自动发现的世界端口交给「开放游戏」宣告通道
+    local_games: LocalGames,
     /// 已经打过日志的失败点，避免每 1.5 秒刷屏
     logged: Mutex<HashSet<String>>,
     /// 致命错误（线程因此退出），由 `core` 读取后展示
@@ -477,8 +490,9 @@ impl LanRelay {
         name: String,
         log: PathBuf,
         peers: Arc<Mutex<Vec<Ipv4Addr>>>,
+        local_games: LocalGames,
     ) -> Result<Self, String> {
-        Self::start_with_sync_port(name, log, peers, SYNC_PORT)
+        Self::start_with_sync_port(name, log, peers, local_games, SYNC_PORT)
     }
 
     /// `sync_port` 仅用于测试（模拟 4448 被占用时的降级路径）。
@@ -486,6 +500,7 @@ impl LanRelay {
         name: String,
         log: PathBuf,
         peers: Arc<Mutex<Vec<Ipv4Addr>>>,
+        local_games: LocalGames,
         sync_port: u16,
     ) -> Result<Self, String> {
         let self_ips = local_ipv4s();
@@ -502,27 +517,35 @@ impl LanRelay {
             fake_ports: Mutex::new(HashSet::new()),
             announce: Mutex::new(Vec::new()),
             peers,
+            local_games,
             logged: Mutex::new(HashSet::new()),
             error: Mutex::new(None),
             degraded: Mutex::new(None),
         });
 
-        // 1) 组播监听：每个网卡一个 socket
-        let mut receivers = Vec::new();
-        let mut receiver_errors = Vec::new();
+        // 1) 组播监听：单个 socket 绑通配地址，再逐网卡加入组播组
+        let receiver = match bind_receiver() {
+            Ok(socket) => socket,
+            Err(err) => return Err(format!("无法监听 {MC_GROUP}:{MC_PORT}：{err}")),
+        };
+        let mut joined = Vec::new();
+        let mut join_errors = Vec::new();
         for ip in &self_ips {
-            match bind_receiver(*ip) {
-                Ok(socket) => receivers.push((*ip, socket)),
+            match receiver.join_multicast_v4(&MC_GROUP, ip) {
+                Ok(()) => joined.push(*ip),
                 Err(err) => {
-                    receiver_errors.push(format!("{ip}: {err}"));
-                    shared.log("WARN", &format!("网卡 {ip} 无法监听 {MC_GROUP}:{MC_PORT}：{err}"));
+                    join_errors.push(format!("{ip}: {err}"));
+                    shared.log(
+                        "WARN",
+                        &format!("网卡 {ip} 无法加入 {MC_GROUP}:{MC_PORT}：{err}"),
+                    );
                 }
             }
         }
-        if receivers.is_empty() {
+        if joined.is_empty() {
             return Err(format!(
-                "无法监听 {MC_GROUP}:{MC_PORT}（{}）",
-                receiver_errors.join("；")
+                "无法加入组播组 {MC_GROUP}:{MC_PORT}（{}）",
+                join_errors.join("；")
             ));
         }
 
@@ -556,9 +579,9 @@ impl LanRelay {
         }
 
         let mut handles = Vec::new();
-        for (ip, socket) in receivers {
+        {
             let shared = shared.clone();
-            handles.push(thread::spawn(move || recv_loop(shared, ip, socket)));
+            handles.push(thread::spawn(move || recv_loop(shared, receiver)));
         }
         if let Some(sync) = sync {
             let shared = shared.clone();
@@ -616,6 +639,7 @@ impl LanRelay {
         }
         self.shared.announce.lock().unwrap().clear();
         self.shared.fake_ports.lock().unwrap().clear();
+        self.shared.local_games.lock().unwrap().clear_minecraft();
         self.shared.log("INFO", "局域网发现中继已停止");
     }
 }
@@ -627,7 +651,7 @@ impl Drop for LanRelay {
 }
 
 /// 组播监听：只认本机网卡发出的公告，伪造的回灌按端口过滤。
-fn recv_loop(shared: Arc<Shared>, ip: Ipv4Addr, socket: UdpSocket) {
+fn recv_loop(shared: Arc<Shared>, socket: UdpSocket) {
     let mut buf = [0u8; MAX_PACKET];
     let mut last_sweep = Instant::now();
     while !shared.stopped() {
@@ -656,11 +680,12 @@ fn recv_loop(shared: Arc<Shared>, ip: Ipv4Addr, socket: UdpSocket) {
                     shared.log(
                         "INFO",
                         &format!(
-                            "检测到本机世界：端口 {}，MOTD「{}」（来自网卡 {ip}）",
+                            "检测到本机世界：端口 {}，MOTD「{}」",
                             announcement.port, announcement.motd
                         ),
                     );
                 }
+                publish_local_worlds(&shared);
             }
             Err(err)
                 if matches!(
@@ -668,9 +693,9 @@ fn recv_loop(shared: Arc<Shared>, ip: Ipv4Addr, socket: UdpSocket) {
                     io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
                 ) => {}
             Err(err) => shared.log_once(
-                &format!("recv-{ip}"),
+                "recv",
                 "WARN",
-                &format!("读取组播失败（网卡 {ip}）：{err}"),
+                &format!("读取组播失败：{err}"),
             ),
         }
 
@@ -690,8 +715,22 @@ fn recv_loop(shared: Arc<Shared>, ip: Ipv4Addr, socket: UdpSocket) {
                     ),
                 );
             }
+            publish_local_worlds(&shared);
         }
     }
+}
+
+/// 把本机自动发现的世界同步给「开放游戏」宣告通道。
+fn publish_local_worlds(shared: &Shared) {
+    let worlds: Vec<(u16, String)> = shared
+        .local
+        .lock()
+        .unwrap()
+        .active()
+        .into_iter()
+        .map(|world| (world.port, world.motd))
+        .collect();
+    shared.local_games.lock().unwrap().set_minecraft(worlds);
 }
 
 /// 房间内同步：发本机世界端口、收对端端口、维护转发与伪造公告。
@@ -1099,7 +1138,14 @@ mod tests {
             std::thread::current().id()
         ));
         let peers = Arc::new(Mutex::new(Vec::new()));
-        let relay = match LanRelay::start_with_sync_port("测试房间".to_string(), log, peers, port) {
+        let local_games = Arc::new(Mutex::new(crate::games::LocalGamesState::default()));
+        let relay = match LanRelay::start_with_sync_port(
+            "测试房间".to_string(),
+            log,
+            peers,
+            local_games,
+            port,
+        ) {
             Ok(relay) => relay,
             Err(err) => {
                 // 某些环境（CI 容器）不允许绑定组播：跳过，不影响其余断言
@@ -1111,6 +1157,63 @@ mod tests {
         assert!(warning.is_some(), "同步端口被占用时应给出降级原因");
         assert!(relay.alive(), "降级后中继本身仍应在运行");
         drop(relay);
+    }
+
+    /// 端到端验证采集链路：按原版节奏向 `224.0.2.60:4445` 播一条公告，
+    /// 中继必须把它认成本机世界并写进「开放游戏」的本机游戏表。
+    #[test]
+    fn relay_detects_local_multicast_announcement() {
+        let log = std::env::temp_dir().join(format!(
+            "lanlink-lan-detect-{}-{:?}.log",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let peers = Arc::new(Mutex::new(Vec::new()));
+        let local_games = Arc::new(Mutex::new(crate::games::LocalGamesState::default()));
+        let relay = match LanRelay::start_with_sync_port(
+            "测试房间".to_string(),
+            log,
+            peers,
+            local_games.clone(),
+            SYNC_PORT,
+        ) {
+            Ok(relay) => relay,
+            Err(err) => {
+                // CI 容器里可能不允许绑定组播：跳过，不算失败
+                eprintln!("本机无法绑定 {MC_GROUP}:{MC_PORT}，跳过采集链路验证：{err}");
+                return;
+            }
+        };
+
+        let port = 25599;
+        let payload = build_announcement("Steve - Test", port);
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let mut sent = false;
+        let mut detected = false;
+        while Instant::now() < deadline {
+            // 原版每 1.5 秒播一次：这里边播边等，网卡列表中途变化也不影响
+            for ip in local_ipv4s() {
+                if let Ok(socket) = bind_sender(ip) {
+                    sent |= socket
+                        .send_to(payload.as_bytes(), SocketAddr::from((MC_GROUP, MC_PORT)))
+                        .is_ok();
+                }
+            }
+            if local_games
+                .lock()
+                .unwrap()
+                .snapshot()
+                .iter()
+                .any(|game| game.port == port && game.source == "minecraft")
+            {
+                detected = true;
+                break;
+            }
+            thread::sleep(Duration::from_millis(200));
+        }
+        drop(relay);
+        assert!(sent, "本机没有可用于发送组播的网卡");
+        assert!(detected, "3 秒内没有从组播公告里认出本机世界");
     }
 
     #[test]

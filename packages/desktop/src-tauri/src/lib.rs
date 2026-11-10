@@ -2,6 +2,7 @@ mod broadcast;
 mod config;
 mod core;
 mod elevate;
+mod games;
 mod http;
 mod lan;
 mod proc;
@@ -93,6 +94,7 @@ fn save_settings(relays: String, resolver_base_url: Option<String>) -> Result<Se
     settings.silent_prompted = existing.silent_prompted;
     settings.lan_discovery = existing.lan_discovery;
     settings.broadcast_ports = existing.broadcast_ports.clone();
+    settings.manual_games = existing.manual_games.clone();
     settings.save()?;
     Ok(settings)
 }
@@ -117,6 +119,19 @@ fn set_broadcast_ports(state: State<'_, AppState>, ports: Vec<u16>) -> Result<St
         .lock()
         .unwrap()
         .set_broadcast_ports(settings.broadcast_ports.clone()))
+}
+
+/// 设置「开放游戏」的手动登记表。只登记名称与端口，不做进程识别。
+#[tauri::command]
+fn set_manual_games(
+    state: State<'_, AppState>,
+    items: Vec<games::ManualGame>,
+) -> Result<Status, String> {
+    let items = games::normalize_manual(&items);
+    let mut settings = Settings::load();
+    settings.manual_games = items.clone();
+    settings.save()?;
+    Ok(state.tunnel.lock().unwrap().set_manual_games(items))
 }
 
 /// 提权方式（Windows 计划任务静默提权 / 其他平台固定启动即提权）。
@@ -455,13 +470,15 @@ fn elevate_at_launch(args: &[String]) {
         return;
     }
 
-    // 开发态（debug 构建）默认跳过启动即提权：
+    // 开发态默认跳过启动即提权：
     // `tauri dev` 跑的是 target/debug 下的裸可执行文件，走授权会让当前进程先退出，
     // dev 会话随之结束（Vite 也被带走），root 实例没有 dev server 可加载，窗口就不出现。
     // 连接时的提权路径不受影响（点「连接」仍按原有方式请求授权）。
+    // 判据用 `tauri::is_dev()`（即未启用 `custom-protocol`），而不是 `debug_assertions`：
+    // `tauri build --debug` 产出的 .app 已经内嵌前端资源，属于可分发产物，必须启动即提权。
     // 要在 dev 里验证真实的启动提权，设 LANLINK_FORCE_ELEVATE=1。
-    if cfg!(debug_assertions) && std::env::var_os("LANLINK_FORCE_ELEVATE").is_none() {
-        eprintln!("[lanlink] debug 构建：跳过启动即提权（验证请设 LANLINK_FORCE_ELEVATE=1）");
+    if tauri::is_dev() && std::env::var_os("LANLINK_FORCE_ELEVATE").is_none() {
+        eprintln!("[lanlink] 开发模式：跳过启动即提权（验证请设 LANLINK_FORCE_ELEVATE=1）");
         return;
     }
 
@@ -646,6 +663,7 @@ pub fn run() {
             save_settings,
             set_lan_discovery,
             set_broadcast_ports,
+            set_manual_games,
             elevation_info,
             set_silent_elevate,
             create_room,

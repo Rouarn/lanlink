@@ -1,7 +1,7 @@
 import { computed, ref } from "vue";
 import { ipc } from "../lib/ipc";
 import { useApp } from "./app";
-import type { Settings, TunnelStatus } from "../types";
+import type { ManualGame, Settings, TunnelStatus } from "../types";
 
 /** 与 Rust 侧 broadcast::default_ports 保持一致：一键开启通用转发时用它 */
 export const DEFAULT_BROADCAST_PORTS = [
@@ -16,6 +16,7 @@ const resolverUrl = ref("");
 const defaultResolver = ref("");
 const lanDiscovery = ref(true);
 const broadcastPorts = ref<number[]>([]);
+const manualGames = ref<ManualGame[]>([]);
 const dirty = ref(false);
 const loaded = ref(false);
 const saving = ref(false);
@@ -42,6 +43,7 @@ function apply(next: Settings): void {
   resolverUrl.value = next.resolver_base_url ?? "";
   lanDiscovery.value = next.lan_discovery;
   broadcastPorts.value = [...next.broadcast_ports];
+  manualGames.value = next.manual_games.map((game) => ({ ...game }));
   defaultResolver.value = info.value?.default_resolver_base_url ?? "";
   dirty.value = false;
 }
@@ -108,12 +110,39 @@ async function setBroadcastPorts(ports: number[]): Promise<TunnelStatus | null> 
   }
 }
 
+/** LanLink 自用端口：MC 组播、MC 跨端同步、开放游戏宣告 */
+const RESERVED_PORTS = [4445, 4448, 4449];
+
+async function setManualGames(items: ManualGame[]): Promise<TunnelStatus | null> {
+  lanBusy.value = true;
+  lanError.value = "";
+  try {
+    const status = await ipc.setManualGames(items);
+    manualGames.value = items.map((game) => ({ ...game }));
+    return status;
+  } catch (error) {
+    lanError.value = String(error);
+    return null;
+  } finally {
+    lanBusy.value = false;
+  }
+}
+
 /** 返回错误文案，空字符串表示端口可用 */
 function validatePort(input: string): string {
   const port = Number(input);
   if (!Number.isInteger(port) || port < 1 || port > 65535) return "端口要是 1 到 65535 之间的整数";
-  if (port === 4445 || port === 4448) return "这个端口 LanLink 自己在用，换一个";
+  if (RESERVED_PORTS.includes(port)) return "这个端口 LanLink 自己在用，换一个";
   if (broadcastPorts.value.includes(port)) return "这个端口已经在表里了";
+  return "";
+}
+
+/** 校验手动登记的「开放游戏」端口 */
+function validateGamePort(input: string): string {
+  const port = Number(input);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) return "端口要是 1 到 65535 之间的整数";
+  if (RESERVED_PORTS.includes(port)) return "这个端口 LanLink 自己在用，换一个";
+  if (manualGames.value.some((game) => game.port === port)) return "这个端口已经登记过了";
   return "";
 }
 
@@ -127,6 +156,7 @@ export function useSettings() {
     resolverIsDefault,
     lanDiscovery,
     broadcastPorts,
+    manualGames,
     dirty,
     loaded,
     saving,
@@ -141,6 +171,8 @@ export function useSettings() {
     markDirty,
     setLanDiscovery,
     setBroadcastPorts,
+    setManualGames,
     validatePort,
+    validateGamePort,
   };
 }

@@ -13,7 +13,10 @@ target/
 *.msi
 
 # Tauri 生成物
-packages/desktop/src-tauri/gen/schemas/
+packages/desktop/src-tauri/gen/
+
+# 临时分享包与本地预览
+.trae-html-share-packages/
 
 # 内置 easytier 二进制：约 29MB/平台，本地构建与打包要用，但不进版本库。
 # CI 会按目标平台从 EasyTier 官方 release 下载到同名目录（见 .github/workflows/build.yml）。

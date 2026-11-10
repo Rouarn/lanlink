@@ -6,7 +6,7 @@ import { useRooms } from "../../stores/rooms";
 import AppIcon from "../../components/ui/AppIcon.vue";
 
 const { openDrawer } = useApp();
-const { error, dismissError } = useConnection();
+const { error, dismissError, disconnect, busy } = useConnection();
 const { retry, goJoin, goCreate } = useRooms();
 
 const title = computed(() => error.value?.title ?? "这次没连上");
@@ -14,8 +14,16 @@ const detail = computed(() => error.value?.detail ?? "再试一次通常就好�
 const technical = computed(() => error.value?.technical ?? "");
 
 async function retryNow(): Promise<void> {
-  dismissError();
+  // 先把上一次失败留下的 core 收掉（后端 start() 里也有兜底回收），再重新连接。
+  // 断开期间不清错误：失败页保持可见，按钮换成「正在重新连接…」，不会闪回房间页。
+  await disconnect();
   await retry();
+}
+
+function switchToJoin(): void {
+  // 必须清掉失败态，否则 RoomView 里「连接失败」的优先级更高，点了也停在原页。
+  dismissError();
+  goJoin();
 }
 
 function back(): void {
@@ -31,11 +39,23 @@ function back(): void {
     <p class="lede center">{{ detail }}</p>
 
     <div class="actions">
-      <button type="button" class="btn btn-primary btn-lg" @click="retryNow">
-        再试一次
-        <AppIcon name="refresh" />
+      <button
+        type="button"
+        class="btn btn-primary btn-lg"
+        :disabled="busy"
+        @click="retryNow"
+      >
+        {{ busy ? "正在重新连接…" : "再试一次" }}
+        <AppIcon v-if="!busy" name="refresh" />
       </button>
-      <button type="button" class="btn btn-secondary btn-lg" @click="goJoin">改用完整房间码</button>
+      <button
+        type="button"
+        class="btn btn-secondary btn-lg"
+        :disabled="busy"
+        @click="switchToJoin"
+      >
+        改用完整房间码
+      </button>
     </div>
 
     <details v-if="technical" class="tech">

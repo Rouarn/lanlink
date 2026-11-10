@@ -5,6 +5,7 @@ import type {
   ElevationInfo,
   LogFilter,
   LogLine,
+  ManualGame,
   Room,
   Settings,
   TunnelStatus,
@@ -54,6 +55,10 @@ export const ipc = {
   /** 通用 UDP 广播转发的端口表；空数组表示关闭，连接中会立刻生效 */
   setBroadcastPorts: (ports: number[]): Promise<TunnelStatus> =>
     invoke<TunnelStatus>("set_broadcast_ports", { ports }),
+
+  /** 「开放游戏」手动登记表；立即生效并持久化 */
+  setManualGames: (items: ManualGame[]): Promise<TunnelStatus> =>
+    invoke<TunnelStatus>("set_manual_games", { items }),
 
   createRoom: (name: string): Promise<Room> => invoke<Room>("create_room", { name }),
 

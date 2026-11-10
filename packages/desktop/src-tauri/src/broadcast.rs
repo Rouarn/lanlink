@@ -65,12 +65,17 @@ pub fn default_ports() -> Vec<u16> {
     normalize_ports(DEFAULT_PORTS)
 }
 
-/// 规整端口表：去掉 0、以及被 lan 同步/组播占用的端口，去重后排序。
+/// 规整端口表：去掉 0、以及被 lan 同步/组播与开放游戏宣告占用的端口，去重后排序。
 pub fn normalize_ports(input: &[u16]) -> Vec<u16> {
     let mut ports: Vec<u16> = input
         .iter()
         .copied()
-        .filter(|port| *port != 0 && *port != lan::MC_PORT && *port != 4448)
+        .filter(|port| {
+            *port != 0
+                && *port != lan::MC_PORT
+                && *port != 4448
+                && *port != crate::games::GAME_PORT
+        })
         .collect();
     ports.sort_unstable();
     ports.dedup();
@@ -404,7 +409,15 @@ mod tests {
 
     #[test]
     fn normalize_drops_reserved_and_duplicates() {
-        let ports = normalize_ports(&[0, 27015, 27015, lan::MC_PORT, 4448, 6112]);
+        let ports = normalize_ports(&[
+            0,
+            27015,
+            27015,
+            lan::MC_PORT,
+            4448,
+            crate::games::GAME_PORT,
+            6112,
+        ]);
         assert_eq!(ports, vec![6112, 27015]);
         assert!(normalize_ports(&[]).is_empty());
     }

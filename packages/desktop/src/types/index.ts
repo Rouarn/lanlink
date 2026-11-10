@@ -17,6 +17,25 @@ export interface PeerInfo {
   proto: string;
 }
 
+/** 用户手动登记的一条「开放游戏」 */
+export interface ManualGame {
+  name: string;
+  port: number;
+}
+
+/** 房间内某个人开放着的一个游戏端点 */
+export interface OpenGame {
+  name: string;
+  /** 开游戏的人；本机开放时是设备名 */
+  hostname: string;
+  ipv4: string;
+  port: number;
+  /** `minecraft` / `manual` / 空字符串 */
+  source: string;
+  /** 是否本机开放 */
+  mine: boolean;
+}
+
 export type CoreState = "idle" | "connecting" | "connected" | "reconnecting" | "failed";
 
 export type RoomRole = "host" | "member";
@@ -63,6 +82,8 @@ export interface Settings {
   lan_discovery: boolean;
   /** 通用 UDP 广播转发端口表（CS 1.6 / 魔兽 / 帝国时代等），空数组表示关闭 */
   broadcast_ports: number[];
+  /** 「开放游戏」手动登记表：只用于展示与复制地址 */
+  manual_games: ManualGame[];
 }
 
 /** 提权方式（Windows 计划任务静默提权） */
@@ -100,6 +121,12 @@ export interface TunnelStatus {
   lan_relay: boolean;
   /** 中继启动/运行失败的原因 */
   lan_error: string | null;
+  /** 房间内「开放游戏」列表（本机 + 对端） */
+  open_games: OpenGame[];
+  /** 开放游戏宣告通道是否在运行 */
+  games_relay: boolean;
+  /** 宣告通道启动/运行失败的原因 */
+  games_error: string | null;
 }
 
 export interface LogLine {

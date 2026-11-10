@@ -29,6 +29,9 @@ pub struct Settings {
     /// 通用 UDP 广播转发端口表（CS 1.6 / 魔兽 / 帝国时代等）；空数组表示关闭
     #[serde(default = "default_broadcast_ports")]
     pub broadcast_ports: Vec<u16>,
+    /// 「开放游戏」手动登记表：只用于展示与复制地址，不参与广播转发
+    #[serde(default)]
+    pub manual_games: Vec<crate::games::ManualGame>,
 }
 
 fn default_true() -> bool {
@@ -50,6 +53,7 @@ impl Default for Settings {
             silent_prompted: false,
             lan_discovery: true,
             broadcast_ports: default_broadcast_ports(),
+            manual_games: Vec::new(),
         }
     }
 }
@@ -319,6 +323,20 @@ mod tests {
         // 用户清空即关闭广播转发
         let off: Settings = serde_json::from_str(r#"{"broadcast_ports":[]}"#).unwrap();
         assert!(off.broadcast_ports.is_empty());
+    }
+
+    #[test]
+    fn manual_games_default_empty_and_round_trip() {
+        let legacy: Settings = serde_json::from_str(r#"{"lan_discovery":true}"#).unwrap();
+        assert!(legacy.manual_games.is_empty());
+
+        let saved: Settings = serde_json::from_str(
+            r#"{"manual_games":[{"name":"CS 1.6","port":27015}]}"#,
+        )
+        .unwrap();
+        assert_eq!(saved.manual_games.len(), 1);
+        assert_eq!(saved.manual_games[0].name, "CS 1.6");
+        assert_eq!(saved.manual_games[0].port, 27015);
     }
 
     #[test]
