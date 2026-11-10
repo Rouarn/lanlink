@@ -1,9 +1,11 @@
 <script setup lang="ts">
+import { computed, ref } from "vue";
 import InfoRow from "../ui/InfoRow.vue";
 import SectionCard from "../ui/SectionCard.vue";
 import StatusDot from "../ui/StatusDot.vue";
 import { useRooms } from "../../composables/useRooms";
 import { useTunnel } from "../../composables/useTunnel";
+import { copyPlainText } from "../../lib/clipboard";
 import { roleLabel, stateLabel } from "../../lib/labels";
 import { busy } from "../../stores/app";
 import type { ActiveRoom } from "../../types";
@@ -26,6 +28,23 @@ const {
   copyLongCode,
 } = useRooms();
 const { status, state } = useTunnel();
+
+/** 只保留拿到虚拟 IP 的对端：中继节点没有 ipv4，不能当成联机地址展示。 */
+const peers = computed(() =>
+  (status.value?.peers ?? []).filter((peer) => peer.ipv4 && peer.ipv4 !== "-"),
+);
+
+/** 记下刚复制的那个 IP，多个对端时只有被点的那一行显示「已复制」 */
+const copiedIp = ref("");
+let copyTimer: number | undefined;
+
+async function copyIp(ip: string): Promise<void> {
+  if (!ip) return;
+  await copyPlainText(ip);
+  copiedIp.value = ip;
+  if (copyTimer) window.clearTimeout(copyTimer);
+  copyTimer = window.setTimeout(() => (copiedIp.value = ""), 1600);
+}
 </script>
 
 <template>
@@ -92,8 +111,42 @@ const { status, state } = useTunnel();
         {{ stateLabel[state] }}
       </span>
     </InfoRow>
-    <InfoRow label="虚拟 IP">
-      <span class="row-value mono">{{ status?.ipv4 ?? "—" }}</span>
+    <InfoRow label="本机虚拟 IP">
+      <span class="row-value inline">
+        <span class="mono">{{ status?.ipv4 ?? "—" }}</span>
+        <button v-if="status?.ipv4" class="chip" @click="copyIp(status?.ipv4 ?? '')">
+          {{ copiedIp === status?.ipv4 ? "已复制" : "复制" }}
+        </button>
+      </span>
+    </InfoRow>
+    <!-- 联机要填的是「对端」的虚拟 IP，不是本机、也不是物理网卡地址 -->
+    <template v-if="peers.length">
+      <InfoRow v-for="peer in peers" :key="peer.ipv4" label="对端虚拟 IP">
+        <span class="row-value inline">
+          <span class="row-hint">{{ peer.hostname }}</span>
+          <span class="mono">{{ peer.ipv4 }}</span>
+          <button class="chip" @click="copyIp(peer.ipv4)">
+            {{ copiedIp === peer.ipv4 ? "已复制" : "复制" }}
+          </button>
+        </span>
+      </InfoRow>
+      <InfoRow label="联机提示" column>
+        <span class="row-hint">
+          《我的世界》Java 版「对局域网开放」后，对方的「多人游戏」列表会自动刷出这个房间（设置页的「局域网发现」保持开启即可）。
+          从局域网列表进入才能用离线账号；若用「直接连接」填「对端 IP:端口」，离线号会报「无效会话」。
+        </span>
+      </InfoRow>
+    </template>
+    <InfoRow label="对端虚拟 IP" v-else>
+      <span class="row-value">—</span>
+    </InfoRow>
+    <InfoRow label="局域网发现">
+      <span class="row-value">
+        {{ !status?.lan_enabled ? "已关闭" : status?.lan_relay ? "运行中" : "未运行" }}
+      </span>
+    </InfoRow>
+    <InfoRow v-if="status?.lan_error" column>
+      <span class="row-hint warn-text">{{ status.lan_error }}</span>
     </InfoRow>
     <InfoRow label="对端数量">
       <span class="row-value">{{ status?.peer_count ?? 0 }}</span>

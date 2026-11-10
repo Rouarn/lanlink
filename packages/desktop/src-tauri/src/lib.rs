@@ -2,6 +2,7 @@ mod config;
 mod core;
 mod elevate;
 mod http;
+mod lan;
 mod proc;
 mod rooms;
 mod settings;
@@ -84,8 +85,18 @@ fn save_settings(relays: String, resolver_base_url: Option<String>) -> Result<Se
     let mut settings = Settings::new(relays, resolver_base_url);
     settings.silent_elevate = existing.silent_elevate;
     settings.silent_prompted = existing.silent_prompted;
+    settings.lan_discovery = existing.lan_discovery;
     settings.save()?;
     Ok(settings)
+}
+
+/// 开关《我的世界》局域网发现中继：立刻落设置，连接中会立刻停/起。
+#[tauri::command]
+fn set_lan_discovery(state: State<'_, AppState>, enabled: bool) -> Result<Status, String> {
+    let mut settings = Settings::load();
+    settings.lan_discovery = enabled;
+    settings.save()?;
+    Ok(state.tunnel.lock().unwrap().set_lan_discovery(enabled))
 }
 
 /// 提权方式（Windows 计划任务静默提权 / 其他平台固定启动即提权）。
@@ -568,6 +579,7 @@ pub fn run() {
             get_status,
             get_settings,
             save_settings,
+            set_lan_discovery,
             elevation_info,
             set_silent_elevate,
             create_room,

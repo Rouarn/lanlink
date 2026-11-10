@@ -7,7 +7,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Settings {
     #[serde(default)]
     pub relays: Vec<String>,
@@ -23,6 +23,27 @@ pub struct Settings {
     /// Windows：首次启动的授权说明已经问过一次（拒绝后不再反复打扰）
     #[serde(default)]
     pub silent_prompted: bool,
+    /// 《我的世界》局域网发现中继：默认开启，可在设置页关闭
+    #[serde(default = "default_true")]
+    pub lan_discovery: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// 手写 `Default`：`lan_discovery` 必须是 `true`（derive 会得到 false）。
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            relays: Vec::new(),
+            resolver_base_url: None,
+            version: 0,
+            silent_elevate: false,
+            silent_prompted: false,
+            lan_discovery: true,
+        }
+    }
 }
 
 /// 当前设置结构版本。历史残留清理只做一次，之后用户手动填的地址不再被删。
@@ -242,6 +263,17 @@ mod tests {
         let mut saved = Settings::new(vec!["tcp://150.158.128.228:11010".to_string()], None);
         assert!(!migrate(&mut saved));
         assert_eq!(saved.relays, vec!["tcp://150.158.128.228:11010"]);
+    }
+
+    #[test]
+    fn lan_discovery_defaults_to_on() {
+        assert!(Settings::default().lan_discovery);
+        // 旧版本写下的设置文件没有这个字段：必须按「开启」处理
+        let legacy: Settings = serde_json::from_str(r#"{"relays":[],"version":1}"#).unwrap();
+        assert!(legacy.lan_discovery);
+        // 用户关掉之后要能记住
+        let off: Settings = serde_json::from_str(r#"{"lan_discovery":false}"#).unwrap();
+        assert!(!off.lan_discovery);
     }
 
     #[test]

@@ -15,8 +15,10 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 
 use crate::config;
+use crate::lan;
 use crate::proc;
 use crate::rooms::Room;
+use crate::settings::Settings;
 
 const LOG_TAIL_LINES: usize = 60;
 const LOG_TAIL_BYTES: u64 = 48 * 1024;
@@ -24,6 +26,10 @@ const LOG_READ_BYTES: u64 = 512 * 1024;
 const MAX_LINE_CHARS: usize = 500;
 const START_TIMEOUT: Duration = Duration::from_secs(20);
 const PORT_RELEASE_TIMEOUT: Duration = Duration::from_secs(3);
+/// 局域网发现中继启动失败后的重试间隔
+const LAN_RETRY_INTERVAL: Duration = Duration::from_secs(30);
+/// 单次 easytier-cli 超过这个耗时就在日志里记一笔（Windows 真机上用来量化进程创建开销）
+const SLOW_CLI: Duration = Duration::from_millis(80);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -72,6 +78,12 @@ pub struct Status {
     pub elevate_error: Option<String>,
     pub log_tail: Vec<String>,
     pub peers: Vec<PeerInfo>,
+    /// 设置里的「局域网发现」开关（默认开启）
+    pub lan_enabled: bool,
+    /// 局域网发现中继是否正在运行
+    pub lan_relay: bool,
+    /// 中继启动/运行失败的原因
+    pub lan_error: Option<String>,
 }
 
 impl Default for State {
@@ -105,6 +117,17 @@ pub struct Tunnel {
     error: Option<String>,
     hint: Option<String>,
     retried: bool,
+    /// 《我的世界》局域网发现中继：只在房间连上期间存在
+    lan: Option<lan::LanRelay>,
+    lan_enabled: bool,
+    lan_error: Option<String>,
+    /// 启动失败后的重试时间，避免每秒重试刷日志
+    lan_retry_at: Option<Instant>,
+    /// 连上之后的节点信息（ipv4 / hostname / version）：这三项在子进程存活期间不会变，
+    /// 缓存后每次状态查询可以少起一个 easytier-cli 进程（Windows 上进程创建很贵）。
+    node_cache: Option<(Option<String>, Option<String>, Option<String>)>,
+    /// 上一次记录「CLI 太慢」日志的时间，避免每次轮询都写一行
+    last_slow_cli: Option<Instant>,
 }
 
 impl Tunnel {
@@ -128,6 +151,12 @@ impl Tunnel {
             error: None,
             hint: None,
             retried: false,
+            lan: None,
+            lan_enabled: Settings::load().lan_discovery,
+            lan_error: None,
+            lan_retry_at: None,
+            node_cache: None,
+            last_slow_cli: None,
         };
         // 上次以 root 运行留下的日志文件：这次启动就顺手把权限交还给登录用户
         tunnel.relax_log_permissions();
@@ -188,6 +217,9 @@ impl Tunnel {
         self.error = None;
         self.hint = None;
         self.retried = false;
+        self.lan_error = None;
+        self.lan_retry_at = None;
+        self.node_cache = None;
 
         if port_in_use() || !port_holders().is_empty() {
             self.state = State::Reconnecting;
@@ -214,6 +246,9 @@ impl Tunnel {
     }
 
     pub fn stop(&mut self) -> Status {
+        // 先停中继：断开房间后要立刻停播并关掉本地转发端口
+        self.lan = None;
+        self.node_cache = None;
         if let Some(mut child) = self.child.take() {
             let _ = child.kill();
             let _ = child.wait();
@@ -262,6 +297,7 @@ impl Tunnel {
 
         if let Some(code) = exit_code {
             self.child = None;
+            self.node_cache = None;
             let code = code.map(|c| c.to_string()).unwrap_or_else(|| "signal".to_string());
             self.state = State::Failed;
             self.error = Some(format!("core 进程已退出（状态码 {code}）"));
@@ -293,20 +329,36 @@ impl Tunnel {
 
         // 2. 读取节点与对端信息
         if status.running {
-            if let Some(node) = self.run_cli_json("node") {
-                status.ipv4 = node
-                    .get("ipv4_addr")
-                    .and_then(|v| v.as_str())
-                    .filter(|v| !v.is_empty())
-                    .map(str::to_owned);
-                status.hostname = node
-                    .get("hostname")
-                    .and_then(|v| v.as_str())
-                    .map(str::to_owned);
-                status.version = node
-                    .get("version")
-                    .and_then(|v| v.as_str())
-                    .map(str::to_owned);
+            // 连上之后 ipv4/hostname/version 在子进程存活期间不会变：
+            // 命中缓存就不再起 easytier-cli，稳态下每次轮询只剩 peer 一次进程创建。
+            if self.state == State::Connected {
+                if let Some((ipv4, hostname, version)) = self.node_cache.clone() {
+                    status.ipv4 = ipv4;
+                    status.hostname = hostname;
+                    status.version = version;
+                }
+            }
+            if status.ipv4.is_none() {
+                if let Some(node) = self.run_cli_json("node") {
+                    status.ipv4 = node
+                        .get("ipv4_addr")
+                        .and_then(|v| v.as_str())
+                        .filter(|v| !v.is_empty())
+                        .map(str::to_owned);
+                    status.hostname = node
+                        .get("hostname")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_owned);
+                    status.version = node
+                        .get("version")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_owned);
+                    self.node_cache = Some((
+                        status.ipv4.clone(),
+                        status.hostname.clone(),
+                        status.version.clone(),
+                    ));
+                }
             }
 
             if let Some(peers) = self.run_cli_json("peer").and_then(|v| v.as_array().cloned()) {
@@ -375,6 +427,12 @@ impl Tunnel {
             _ => {}
         }
 
+        // 4. 局域网发现中继：只在房间真正连上后运行，断开即停
+        self.sync_lan();
+        status.lan_enabled = self.lan_enabled;
+        status.lan_relay = self.lan.is_some();
+        status.lan_error = self.lan_error.clone();
+
         status.state = self.state;
         status.error = self.error.clone();
         status.hint = self.hint.clone();
@@ -383,6 +441,63 @@ impl Tunnel {
         status.role = self.room.as_ref().map(|room| room.role.clone());
         status.network = self.room.as_ref().map(|room| room.network.clone());
         status
+    }
+
+    /// 开关「局域网发现」：立刻生效（关掉时马上停播并释放端口）。
+    pub fn set_lan_discovery(&mut self, enabled: bool) -> Status {
+        self.lan_enabled = enabled;
+        self.lan_error = None;
+        self.lan_retry_at = None;
+        if !enabled {
+            self.lan = None;
+        }
+        self.status()
+    }
+
+    /// 让中继跟上连接状态：连上才启动，断开/关闭开关时立即停。
+    fn sync_lan(&mut self) {
+        let wanted = self.lan_enabled && self.state == State::Connected && self.room.is_some();
+        if !wanted {
+            self.lan = None;
+            return;
+        }
+        if let Some(relay) = self.lan.as_ref() {
+            if relay.alive() {
+                return;
+            }
+            // 线程因致命错误退出：记下原因，下面重建（带退避）
+            self.lan_error = relay.error();
+            self.lan = None;
+            if self.lan_error.is_some() {
+                self.lan_retry_at = Some(Instant::now() + LAN_RETRY_INTERVAL);
+            }
+        }
+        if self
+            .lan_retry_at
+            .map(|at| Instant::now() < at)
+            .unwrap_or(false)
+        {
+            return;
+        }
+        let Some(name) = self.room.as_ref().map(|room| room.name.clone()) else {
+            return;
+        };
+        match lan::LanRelay::start(
+            self.cli.clone(),
+            config::RPC_PORTAL.to_string(),
+            name,
+            self.log_path(),
+        ) {
+            Ok(relay) => {
+                self.lan = Some(relay);
+                self.lan_error = None;
+            }
+            Err(err) => {
+                eprintln!("[lanlink] 局域网发现中继启动失败：{err}");
+                self.lan_error = Some(err);
+                self.lan_retry_at = Some(Instant::now() + LAN_RETRY_INTERVAL);
+            }
+        }
     }
 
     /// 读取日志，`level` 取 all/info/warn/error，`limit` 为返回的最大行数。
@@ -540,8 +655,9 @@ impl Tunnel {
         port_holders()
     }
 
-    fn run_cli_json(&self, subcommand: &str) -> Option<serde_json::Value> {
+    fn run_cli_json(&mut self, subcommand: &str) -> Option<serde_json::Value> {
         let cli = self.cli.as_ref()?;
+        let started = Instant::now();
         let output = proc::command(cli)
             .arg("-p")
             .arg(config::RPC_PORTAL)
@@ -550,10 +666,40 @@ impl Tunnel {
             .arg(subcommand)
             .output()
             .ok()?;
+        // 量化进程创建开销：真机上超过阈值就写进日志（最多 10 秒一条，避免刷屏）
+        let elapsed = started.elapsed();
+        if elapsed >= SLOW_CLI
+            && self
+                .last_slow_cli
+                .map(|at| at.elapsed() >= Duration::from_secs(10))
+                .unwrap_or(true)
+        {
+            self.last_slow_cli = Some(Instant::now());
+            self.note(
+                "WARN",
+                &format!(
+                    "easytier-cli {subcommand} 单次耗时 {}ms（含进程创建）",
+                    elapsed.as_millis()
+                ),
+            );
+        }
         if !output.status.success() {
             return None;
         }
         serde_json::from_slice(&output.stdout).ok()
+    }
+
+    /// 往 core.log 追加一行本应用自己的日志（与 easytier 的格式一致，日志页可直接看到）。
+    fn note(&self, level: &str, message: &str) {
+        use std::io::Write;
+        let line = format!("{} {} lanlink::core: {}\n", lan::timestamp(), level, message);
+        if let Ok(mut file) = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(self.log_path())
+        {
+            let _ = file.write_all(line.as_bytes());
+        }
     }
 
     fn tail_log(&self) -> Vec<String> {

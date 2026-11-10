@@ -34,6 +34,10 @@ export const ipc = {
   setSilentElevate: (enabled: boolean): Promise<ElevationInfo> =>
     invoke<ElevationInfo>("set_silent_elevate", { enabled }),
 
+  /** 开关《我的世界》局域网发现中继，立即生效 */
+  setLanDiscovery: (enabled: boolean): Promise<TunnelStatus> =>
+    invoke<TunnelStatus>("set_lan_discovery", { enabled }),
+
   createRoom: (name: string): Promise<Room> => invoke<Room>("create_room", { name }),
 
   resolveCode: (code: string): Promise<Room> => invoke<Room>("resolve_code", { code }),

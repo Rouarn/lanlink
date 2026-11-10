@@ -59,6 +59,8 @@ export interface Settings {
   silent_elevate: boolean;
   /** Windows：首次授权说明是否已经问过一次 */
   silent_prompted: boolean;
+  /** 《我的世界》局域网发现中继开关（默认开启） */
+  lan_discovery: boolean;
 }
 
 /** 提权方式（Windows 计划任务静默提权） */
@@ -90,6 +92,12 @@ export interface TunnelStatus {
   elevate_error: string | null;
   log_tail: string[];
   peers: PeerInfo[];
+  /** 设置里的「局域网发现」开关 */
+  lan_enabled: boolean;
+  /** 局域网发现中继是否在运行 */
+  lan_relay: boolean;
+  /** 中继启动/运行失败的原因 */
+  lan_error: string | null;
 }
 
 export interface LogLine {
