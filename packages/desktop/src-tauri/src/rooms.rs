@@ -98,17 +98,17 @@ impl RoomCodeResolver for RemoteResolver {
                     format!("解析服务暂时不可用（HTTP {code}）")
                 }
                 crate::http::HttpError::Dns(message) => {
-                    format!("解析服务地址的域名解析失败：{message}")
+                    format!("解析服务连不上（域名解析失败：{message}），请检查网络。{LONG_FALLBACK_HINT}")
                 }
                 crate::http::HttpError::Timeout(message) => {
-                    format!("连接解析服务超时：{message}")
+                    format!("解析服务连不上（连接超时：{message}），请检查网络。{LONG_FALLBACK_HINT}")
                 }
                 crate::http::HttpError::Tls(message) => {
-                    format!("解析服务加密连接失败：{message}")
+                    format!("解析服务加密连接失败：{message}。{LONG_FALLBACK_HINT}")
                 }
-                other => format!("解析服务不可达：{other}"),
+                other => format!("解析服务连不上（{other}），请检查网络。{LONG_FALLBACK_HINT}"),
             };
-            format!("{reason}。{LONG_FALLBACK_HINT}")
+            reason
         })?;
 
         let text = |key: &str| {
@@ -135,7 +135,7 @@ impl RoomCodeResolver for RemoteResolver {
             return Err("解析服务返回的房间配置缺少网络名或密钥".to_string());
         }
         if relays.is_empty() {
-            return Err("解析服务返回的房间没有中继服务器".to_string());
+            return Err("这个房间码里没有中继信息，无法连接".to_string());
         }
         let name = text("name");
         Ok(Room {
@@ -161,7 +161,7 @@ impl RoomCodeResolver for SelfContainedResolver {
         let payload = decode_long(code)?;
         let relays = payload.relays.clone();
         if relays.is_empty() {
-            return Err("完整房间码里没有中继服务器，无法连接".to_string());
+            return Err("这个房间码里没有中继信息，无法连接".to_string());
         }
         Ok(Room {
             code: code.to_string(),
@@ -264,18 +264,12 @@ pub fn create(
 }
 
 /// 加入房间：解析短码或完整码，并写入最近房间。
-pub fn join(
-    code: &str,
-    relays: Vec<String>,
-    remote_base: Option<String>,
-    token: Option<String>,
-) -> Result<Room, String> {
+///
+/// 中继只来自房间记录本身，**不读本地设置**：全新安装、没配过中继也能直接加入。
+pub fn join(code: &str, remote_base: Option<String>, token: Option<String>) -> Result<Room, String> {
     let mut room = resolve_code(code, remote_base, token)?;
-    if !relays.is_empty() {
-        room.relays = relays;
-    }
     if room.relays.is_empty() {
-        return Err("还没有配置中继服务器，请先在「设置」里填写".to_string());
+        return Err("这个房间码里没有中继信息，无法连接".to_string());
     }
     room.last_used = now();
     if room.role != "host" {
@@ -286,6 +280,9 @@ pub fn join(
 }
 
 /// 从缓存里恢复房间（保留房主身份），缓存没有就走解析。
+///
+/// 只有房主自己的房间会用本地设置里的中继覆盖（创建时改过配置的场景）；
+/// 加入方的房间沿用记录里的中继，避免本地中继设置影响别人的房间。
 pub fn lookup(
     code: &str,
     relays: Vec<String>,
@@ -294,13 +291,13 @@ pub fn lookup(
 ) -> Result<Room, String> {
     let code = code.trim();
     if let Some(mut room) = cached().into_iter().find(|room| room.code == code) {
-        if !relays.is_empty() {
+        if room.role == "host" && !relays.is_empty() {
             room.relays = relays;
         }
         room.last_used = now();
         return Ok(room);
     }
-    join(code, relays, remote_base, token)
+    join(code, remote_base, token)
 }
 
 /// 导出完整房间码：版本 + 网络名 + 密钥 + 中继列表 + IP 模式，压缩后 base64url。
@@ -532,6 +529,70 @@ mod tests {
         assert!(network
             .chars()
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'));
+    }
+
+    fn sample_room(relays: Vec<String>) -> Room {
+        Room {
+            code: "ROOM-8K3M".to_string(),
+            name: "测试房间".to_string(),
+            network: network_from("ROOM-8K3M"),
+            secret: derive_secret("ROOM-8K3M"),
+            role: "host".to_string(),
+            relays,
+            kind: "long".to_string(),
+            shared: false,
+            created_at: 0,
+            last_used: 0,
+        }
+    }
+
+    /// 把房间缓存放进临时目录，避免单测写到真实的用户数据目录。
+    fn isolated_cache() -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("lanlink-rooms-test-{}", std::process::id()));
+        crate::config::set_override(dir.clone(), None);
+        dir
+    }
+
+    /// 全新安装（本地 relays 为空）也要能凭房间码里的中继加入。
+    #[test]
+    fn join_without_local_relays_uses_record_relays() {
+        isolated_cache();
+        let host = sample_room(vec!["tcp://relay.example.com:11010".to_string()]);
+        let code = export_long(&host).expect("导出长码");
+
+        let joined = join(&code, None, None).expect("本地没配中继也应能加入");
+        assert_eq!(joined.relays, host.relays);
+        assert_eq!(joined.network, host.network);
+        assert_eq!(joined.role, "member");
+    }
+
+    /// 只有房间码里真的没有中继时才报缺失，不再提「去配置中继」。
+    #[test]
+    fn join_reports_missing_relays_in_code() {
+        isolated_cache();
+        let host = sample_room(Vec::new());
+        let code = export_long(&host).expect("导出长码");
+
+        let err = join(&code, None, None).unwrap_err();
+        assert!(err.contains("没有中继信息"), "实际错误：{err}");
+    }
+
+    /// 加入方的房间用记录里的中继，不被本地设置覆盖。
+    #[test]
+    fn lookup_keeps_record_relays_for_member() {
+        isolated_cache();
+        let host = sample_room(vec!["tcp://relay.example.com:11010".to_string()]);
+        let code = export_long(&host).expect("导出长码");
+        let joined = join(&code, None, None).expect("加入应成功");
+
+        let again = lookup(
+            &joined.code,
+            vec!["tcp://local.example.com:11010".to_string()],
+            None,
+            None,
+        )
+        .expect("缓存命中");
+        assert_eq!(again.relays, host.relays);
     }
 
     /// 本地自测：先起服务，再跑

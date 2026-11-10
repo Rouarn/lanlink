@@ -24,7 +24,7 @@ async function handleDisconnect(): Promise<void> {
   <BannerNotice
     v-if="!configured"
     title="尚未配置中继服务器"
-    text="创建或加入房间前，需要先在设置里填写至少一条中继地址。"
+    text="创建房间前需要先在设置里填写至少一条中继地址；加入别人的房间不用配置，房间码里自带中继。"
   >
     <template #action>
       <button class="banner-action" @click="activeTab = 'settings'">去设置</button>

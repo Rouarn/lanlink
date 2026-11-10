@@ -72,9 +72,9 @@ async function createRoom(): Promise<void> {
   }
 }
 
-/** 只解析、不连接：先把房间名与中继显示出来，确认后再连。 */
+/** 只解析、不连接：先把房间名与中继显示出来，确认后再连。
+ *  加入方不需要本地已配中继——中继来自房间记录本身。 */
 async function lookupCode(): Promise<void> {
-  if (!requireRelay()) return;
   const code = joinCode.value.trim();
   if (!code) {
     message.value = "请填写房间码";

@@ -72,7 +72,7 @@ const { running, pending } = useTunnel();
           </button>
           <button
             class="btn-primary small"
-            :disabled="!configured || busy || pending || !preview"
+            :disabled="busy || pending || !preview"
             @click="joinResolved"
           >
             加入并连接

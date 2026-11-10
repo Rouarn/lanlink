@@ -239,12 +239,12 @@ fn clear_rooms() -> Result<(), String> {
 }
 
 /// 连接指定房间。普通权限下会以管理员重新拉起自身，然后把当前实例退出。
+///
+/// 中继来自房间记录：加入方不需要先在本地配置中继，全新安装也能直接连；
+/// 只有创建房间（`create_room`）才要求本地已配中继。
 #[tauri::command]
 fn connect(state: State<'_, AppState>, code: String) -> Result<Status, String> {
     let settings = Settings::load();
-    if settings.relays.is_empty() {
-        return Err("还没有配置中继服务器，请先在「设置」里填写".to_string());
-    }
     let room = rooms::lookup(
         &code,
         settings.relays.clone(),
