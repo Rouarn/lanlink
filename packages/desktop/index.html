@@ -4,6 +4,23 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>LanLink</title>
+    <script>
+      // 首帧就把主题定下来，避免深色系统下先闪一帧浅色。
+      // 手动选择优先，否则跟随系统；键名与 stores/theme.ts 保持一致。
+      (function () {
+        try {
+          var saved = localStorage.getItem("lanlink.theme");
+          var dark =
+            saved === "dark" ||
+            (saved !== "light" && window.matchMedia("(prefers-color-scheme: dark)").matches);
+          var theme = dark ? "dark" : "light";
+          document.documentElement.dataset.theme = theme;
+          document.documentElement.style.colorScheme = theme;
+        } catch (error) {
+          document.documentElement.dataset.theme = "light";
+        }
+      })();
+    </script>
   </head>
   <body>
     <div id="app"></div>

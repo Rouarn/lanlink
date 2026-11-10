@@ -1,5 +1,9 @@
 /* 设计令牌：只放取值，不放任何组件样式。
-   浅色为暖纸色，深色为石墨色；强调色沿用暖橙，避免变成运维控制台。 */
+   浅色为暖纸色，深色为石墨色；强调色沿用暖橙，避免变成运维控制台。
+
+   主题不再由媒体查询决定：main.ts 之前的内联脚本会先给 <html> 写
+   data-theme="light|dark"（默认跟随系统，可在设置里手动指定），
+   所以浅色这里就是默认值，任何情况下令牌都是完整的。 */
 :root {
   --font-ui: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC",
     "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif;
@@ -37,75 +41,75 @@
   --dur-base: 0.18s;
   --dur-slow: 0.26s;
 
-  color-scheme: light dark;
+  color-scheme: light;
   font-family: var(--font-ui);
   font-size: var(--text-md);
 }
 
-@media (prefers-color-scheme: light) {
-  :root {
-    --window-bg: #f7f5f1;
-    --glass: rgba(250, 248, 244, 0.76);
-    --glass-content: rgba(247, 245, 241, 0.88);
-    --surface: #ffffff;
-    --surface-2: #f2efe9;
-    --surface-3: #e9e5de;
-    --field: #ffffff;
-    --text: #1f2023;
-    --text-2: #5f626a;
-    --text-3: #8e9199;
-    --border: rgba(31, 32, 35, 0.09);
-    --border-strong: rgba(31, 32, 35, 0.17);
-    --accent: #b94e27;
-    --accent-hover: #a6431f;
-    --accent-on: #ffffff;
-    --accent-soft: #f7e9e2;
-    --accent-soft-2: #f0d6c9;
-    --ok: #2c8a5e;
-    --ok-dot: #34a06c;
-    --ok-soft: #e6f3ec;
-    --warn: #9a6200;
-    --warn-soft: #fbf0dc;
-    --danger: #b53a32;
-    --danger-soft: #f9e8e6;
-    --relay: #2e7c93;
-    --relay-soft: #e4f0f3;
-    --hover: rgba(31, 32, 35, 0.045);
-    --shadow-rgb: 33, 30, 26;
-    --scrim: rgba(28, 26, 23, 0.26);
-  }
+/* 浅色（默认） */
+:root,
+:root[data-theme="light"] {
+  --window-bg: #f7f5f1;
+  --glass: rgba(250, 248, 244, 0.76);
+  --glass-content: rgba(247, 245, 241, 0.88);
+  --surface: #ffffff;
+  --surface-2: #f2efe9;
+  --surface-3: #e9e5de;
+  --field: #ffffff;
+  --text: #1f2023;
+  --text-2: #5f626a;
+  --text-3: #656970;
+  --border: rgba(31, 32, 35, 0.09);
+  --border-strong: rgba(31, 32, 35, 0.17);
+  --accent: #b94e27;
+  --accent-hover: #a6431f;
+  --accent-on: #ffffff;
+  --accent-soft: #f7e9e2;
+  --accent-soft-2: #f0d6c9;
+  --ok: #23734d;
+  --ok-dot: #2c8a5e;
+  --ok-soft: #e6f3ec;
+  --warn: #8c5900;
+  --warn-soft: #fbf0dc;
+  --danger: #b53a32;
+  --danger-soft: #f9e8e6;
+  --relay: #2a7186;
+  --relay-soft: #e4f0f3;
+  --hover: rgba(31, 32, 35, 0.045);
+  --shadow-rgb: 33, 30, 26;
+  --scrim: rgba(28, 26, 23, 0.26);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --window-bg: #1a1b1d;
-    --glass: rgba(24, 25, 27, 0.74);
-    --glass-content: rgba(26, 27, 29, 0.88);
-    --surface: #202225;
-    --surface-2: #282a2e;
-    --surface-3: #31343a;
-    --field: #1b1c1f;
-    --text: #f1efea;
-    --text-2: #a8abb2;
-    --text-3: #7c8088;
-    --border: rgba(255, 255, 255, 0.08);
-    --border-strong: rgba(255, 255, 255, 0.17);
-    --accent: #e88355;
-    --accent-hover: #f0956c;
-    --accent-on: #22120b;
-    --accent-soft: rgba(232, 131, 85, 0.14);
-    --accent-soft-2: rgba(232, 131, 85, 0.26);
-    --ok: #5bc894;
-    --ok-dot: #4fbe88;
-    --ok-soft: rgba(91, 200, 148, 0.13);
-    --warn: #e4a94b;
-    --warn-soft: rgba(228, 169, 75, 0.13);
-    --danger: #f07a70;
-    --danger-soft: rgba(240, 122, 112, 0.13);
-    --relay: #7cc0d4;
-    --relay-soft: rgba(124, 192, 212, 0.13);
-    --hover: rgba(255, 255, 255, 0.055);
-    --shadow-rgb: 0, 0, 0;
-    --scrim: rgba(0, 0, 0, 0.46);
-  }
+/* 深色 */
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --window-bg: #1a1b1d;
+  --glass: rgba(24, 25, 27, 0.74);
+  --glass-content: rgba(26, 27, 29, 0.88);
+  --surface: #202225;
+  --surface-2: #282a2e;
+  --surface-3: #31343a;
+  --field: #1b1c1f;
+  --text: #f1efea;
+  --text-2: #a8abb2;
+  --text-3: #9498a1;
+  --border: rgba(255, 255, 255, 0.08);
+  --border-strong: rgba(255, 255, 255, 0.17);
+  --accent: #e88355;
+  --accent-hover: #f0956c;
+  --accent-on: #22120b;
+  --accent-soft: rgba(232, 131, 85, 0.14);
+  --accent-soft-2: rgba(232, 131, 85, 0.26);
+  --ok: #5bc894;
+  --ok-dot: #4fbe88;
+  --ok-soft: rgba(91, 200, 148, 0.13);
+  --warn: #e4a94b;
+  --warn-soft: rgba(228, 169, 75, 0.13);
+  --danger: #f07a70;
+  --danger-soft: rgba(240, 122, 112, 0.13);
+  --relay: #7cc0d4;
+  --relay-soft: rgba(124, 192, 212, 0.13);
+  --hover: rgba(255, 255, 255, 0.055);
+  --shadow-rgb: 0, 0, 0;
+  --scrim: rgba(0, 0, 0, 0.46);
 }

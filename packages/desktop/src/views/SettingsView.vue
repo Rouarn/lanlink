@@ -2,6 +2,7 @@
 import RelayCard from "../components/settings/RelayCard.vue";
 import ResolverCard from "../components/settings/ResolverCard.vue";
 import LanSettingsCard from "../components/settings/LanSettingsCard.vue";
+import AppearanceCard from "../components/settings/AppearanceCard.vue";
 import PermissionCard from "../components/settings/PermissionCard.vue";
 import AboutCard from "../components/settings/AboutCard.vue";
 </script>
@@ -17,6 +18,7 @@ import AboutCard from "../components/settings/AboutCard.vue";
       <RelayCard />
       <ResolverCard />
       <LanSettingsCard class="span-2" />
+      <AppearanceCard />
       <PermissionCard />
       <AboutCard />
     </div>
