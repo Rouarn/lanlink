@@ -175,6 +175,8 @@ pub struct Tunnel {
     last_cli_error: Option<Instant>,
     /// 对端虚拟 IP 快照：局域网发现与广播转发共用，避免各自轮询 easytier-cli
     peer_ips: Arc<Mutex<Vec<Ipv4Addr>>>,
+    /// 对端虚拟 IP → 快照里的 RTT（毫秒）：局域网转发按它推导出向连接超时
+    peer_latency: Arc<Mutex<HashMap<Ipv4Addr, u32>>>,
     /// 对端列表快照（界面用），查询失败时保留上一次
     peer_cache: Option<PeerSnapshot>,
     /// 上一次查询对端列表的时间（节流到 `PEER_REFRESH`）
@@ -222,6 +224,7 @@ impl Tunnel {
             last_slow_cli: None,
             last_cli_error: None,
             peer_ips: Arc::new(Mutex::new(Vec::new())),
+            peer_latency: Arc::new(Mutex::new(HashMap::new())),
             peer_cache: None,
             peer_at: None,
             bc: None,
@@ -316,6 +319,7 @@ impl Tunnel {
         self.peer_cache = None;
         self.peer_at = None;
         self.peer_ips.lock().unwrap().clear();
+        self.peer_latency.lock().unwrap().clear();
 
         if port_in_use() || !port_holders().is_empty() {
             self.state = State::Reconnecting;
@@ -376,6 +380,7 @@ impl Tunnel {
         self.peer_cache = None;
         self.peer_at = None;
         self.peer_ips.lock().unwrap().clear();
+        self.peer_latency.lock().unwrap().clear();
         if let Some(mut child) = self.child.take() {
             let _ = child.kill();
             let _ = child.wait();
@@ -554,25 +559,21 @@ impl Tunnel {
         // 4.2 把对端开放的游戏交给局域网中继：在本地起 TCP 转发并伪造《我的世界》
         // 公告，原版「多人游戏」列表才会刷出条目。数据只走宣告通道，不再另发同步报文，
         // 所以自动发现与手动登记的世界表现一致，同一个世界也只会有一个转发端口。
-        // 同时把「最近还在发宣告的对端」带过去：中继靠它区分「对端关了世界」和
-        // 「宣告被网络吞了」，后者要保留转发，不能跟着 UDP 抖动一起撤。
+        // 转发的存废完全跟着这份宣告快照（18 秒 TTL），不在这里做任何可达性探测。
         if let Some(lan) = &self.lan {
-            let (worlds, live) = match self.games.as_ref() {
-                Some(relay) => (
-                    relay
-                        .snapshot()
-                        .into_iter()
-                        .map(|game| lan::RemoteWorld {
-                            ip: game.ip,
-                            port: game.port,
-                            name: game.name,
-                        })
-                        .collect(),
-                    relay.live_peers(Duration::from_secs(6)),
-                ),
-                None => (Vec::new(), Vec::new()),
+            let worlds = match self.games.as_ref() {
+                Some(relay) => relay
+                    .snapshot()
+                    .into_iter()
+                    .map(|game| lan::RemoteWorld {
+                        ip: game.ip,
+                        port: game.port,
+                        name: game.name,
+                    })
+                    .collect(),
+                None => Vec::new(),
             };
-            lan.set_remote_worlds(worlds, live);
+            lan.set_remote_worlds(worlds);
         }
 
         status.state = self.state;
@@ -607,6 +608,7 @@ impl Tunnel {
 
         let mut info = Vec::new();
         let mut ips: Vec<Ipv4Addr> = Vec::new();
+        let mut latency: HashMap<Ipv4Addr, u32> = HashMap::new();
         let mut count = 0u32;
         let mut direct = 0u32;
         for peer in peers {
@@ -623,9 +625,20 @@ impl Tunnel {
                 direct += 1;
             }
             let raw_ip = peer.get("ipv4").and_then(|v| v.as_str()).unwrap_or("-");
+            // 延迟只用于推导局域网转发的出向连接超时：经中继的 peer RTT 会大很多，
+            // 用固定短超时会把本来能通的连接判死。拿不到就留空，转发侧退回兜底值。
+            let lat_ms = peer
+                .get("lat_ms")
+                .and_then(|v| v.as_str())
+                .and_then(|v| v.parse::<f64>().ok())
+                .filter(|v| *v >= 0.0)
+                .map(|v| v.round() as u32);
             if let Some(ip) = lan::parse_peer_ip(raw_ip) {
                 if !ips.contains(&ip) {
                     ips.push(ip);
+                }
+                if let Some(ms) = lat_ms {
+                    latency.insert(ip, ms);
                 }
             }
             info.push(PeerInfo {
@@ -641,6 +654,7 @@ impl Tunnel {
         }
 
         *self.peer_ips.lock().unwrap() = ips;
+        *self.peer_latency.lock().unwrap() = latency;
         self.peer_cache = Some(PeerSnapshot {
             peers: info,
             count,
@@ -817,6 +831,7 @@ impl Tunnel {
                             name,
                             self.log_path(),
                             self.peer_ips.clone(),
+                            self.peer_latency.clone(),
                             self.local_games.clone(),
                         ) {
                             Ok(relay) => {
