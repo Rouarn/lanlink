@@ -8,6 +8,7 @@ import {
 } from "../../../stores/settings";
 import AppSwitch from "../../ui/AppSwitch.vue";
 import AppIcon from "../../ui/AppIcon.vue";
+import { lanIssue } from "../../../lib/lan";
 
 const { toast } = useApp();
 const { phase, status, applyStatus } = useConnection();
@@ -19,6 +20,13 @@ const remembered = ref<number[]>([...DEFAULT_BROADCAST_PORTS]);
 
 const on = computed(() => broadcastPorts.value.length > 0);
 const connected = computed(() => phase.value === "connected");
+const issue = computed(() => lanIssue(status.value));
+
+const dotTone = computed(() => {
+  if (issue.value?.level === "error") return "danger";
+  if (issue.value?.level === "warn") return "warn";
+  return on.value ? "ok" : "idle";
+});
 
 const note = computed(() => {
   if (!on.value) return "已关闭，端口表为空。";
@@ -63,10 +71,18 @@ async function remove(port: number): Promise<void> {
     </div>
 
     <div class="status-line">
-      <span class="dot" :class="on ? 'ok' : 'idle'" />
+      <span class="dot" :class="dotTone" />
       {{ note }}
-      <span v-if="status?.lan_error" class="mono">{{ status.lan_error }}</span>
     </div>
+
+    <p v-if="issue" class="field-hint" :class="issue.level">
+      <template v-if="issue.level === 'warn'">
+        部分功能受限：{{ issue.message }}。其余端口仍在转发。
+      </template>
+      <template v-else>
+        广播转发没起来：{{ issue.message }}。可以关掉再打开试一次，或直接连对方的虚拟 IP。
+      </template>
+    </p>
 
     <div v-if="on" class="ports">
       <span v-for="port in broadcastPorts" :key="port" class="port-chip mono">

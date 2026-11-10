@@ -307,6 +307,10 @@
   color: var(--danger);
 }
 
+.field-hint.warn {
+  color: var(--warn);
+}
+
 .form-actions {
   display: flex;
   flex-wrap: wrap;

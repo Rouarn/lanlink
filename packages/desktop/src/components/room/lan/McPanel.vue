@@ -3,6 +3,7 @@ import { computed } from "vue";
 import { useApp } from "../../../stores/app";
 import { useConnection } from "../../../stores/connection";
 import { useSettings } from "../../../stores/settings";
+import { lanIssue } from "../../../lib/lan";
 import AppSwitch from "../../ui/AppSwitch.vue";
 import AppIcon from "../../ui/AppIcon.vue";
 
@@ -12,6 +13,13 @@ const { lanDiscovery, lanBusy, setLanDiscovery } = useSettings();
 
 const connected = computed(() => phase.value === "connected");
 const running = computed(() => Boolean(status.value?.lan_relay));
+const issue = computed(() => lanIssue(status.value));
+
+const dotTone = computed(() => {
+  if (issue.value?.level === "error") return "danger";
+  if (issue.value?.level === "warn") return "warn";
+  return running.value ? "ok" : "idle";
+});
 
 const note = computed(() => {
   if (!lanDiscovery.value) return "已关闭，不会广播任何东西。";
@@ -34,9 +42,18 @@ async function toggle(next: boolean): Promise<void> {
     </div>
 
     <div class="status-line">
-      <span class="dot" :class="running ? 'ok' : 'idle'" />
+      <span class="dot" :class="dotTone" />
       {{ note }}
     </div>
+
+    <p v-if="issue" class="field-hint" :class="issue.level">
+      <template v-if="issue.level === 'warn'">
+        部分功能受限：{{ issue.message }}。发现服务仍在运行，只是其中一项没起来。
+      </template>
+      <template v-else>
+        发现服务没起来：{{ issue.message }}。可以关掉再打开试一次，或直接用上面的虚拟 IP 连。
+      </template>
+    </p>
 
     <div class="support-list">
       <p class="support yes">

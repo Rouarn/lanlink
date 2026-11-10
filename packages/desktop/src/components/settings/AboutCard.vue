@@ -18,7 +18,7 @@ const versionText = computed(() =>
 );
 
 async function copyDiagnostics(): Promise<void> {
-  await copyPlainText(buildDiagnostics(info.value, status.value));
+  await copyPlainText(buildDiagnostics(info.value, status.value, version.value));
   toast("诊断信息已复制");
 }
 </script>
