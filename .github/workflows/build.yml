@@ -27,7 +27,9 @@ jobs:
       matrix:
         include:
           - name: macos-arm64
-            os: macos-latest
+            # 不用 macos-latest：它当前指向的镜像池排队 15 分钟就会被取消，
+            # 显式固定到 arm64 的 macos-15 镜像。
+            os: macos-15
             target: aarch64-apple-darwin
             platform_dir: macos-arm64
             easytier_asset: easytier-macos-aarch64-v2.6.4.zip
