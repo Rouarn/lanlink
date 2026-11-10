@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
   AppInfo,
+  ElevationInfo,
   LogFilter,
   LogLine,
   Room,
@@ -27,6 +28,11 @@ export const ipc = {
     relays: string;
     resolverBaseUrl: string;
   }): Promise<Settings> => invoke<Settings>("save_settings", input),
+
+  elevationInfo: (): Promise<ElevationInfo> => invoke<ElevationInfo>("elevation_info"),
+
+  setSilentElevate: (enabled: boolean): Promise<ElevationInfo> =>
+    invoke<ElevationInfo>("set_silent_elevate", { enabled }),
 
   createRoom: (name: string): Promise<Room> => invoke<Room>("create_room", { name }),
 

@@ -14,9 +14,15 @@ pub struct Settings {
     /// 短码远端解析服务地址（默认内置，可改成自己的服务）
     #[serde(default)]
     pub resolver_base_url: Option<String>,
-    /// 设置结构版本：旧文件里没有这个字段（0），迁移一次后就固定为当前版本。
+    /// 设置结构版本：旧文件里没有这个字段（0），迁移后就固定为当前版本。
     #[serde(default)]
     pub version: u32,
+    /// Windows：是否已开启「计划任务静默提权」（不再每次弹 UAC）
+    #[serde(default)]
+    pub silent_elevate: bool,
+    /// Windows：首次启动的授权说明已经问过一次（拒绝后不再反复打扰）
+    #[serde(default)]
+    pub silent_prompted: bool,
 }
 
 /// 当前设置结构版本。历史残留清理只做一次，之后用户手动填的地址不再被删。
@@ -53,6 +59,7 @@ impl Settings {
             relays,
             resolver_base_url,
             version: SETTINGS_VERSION,
+            ..Settings::default()
         }
     }
 
@@ -225,6 +232,7 @@ mod tests {
             relays: vec!["tcp://150.158.128.228:11010".to_string()],
             resolver_base_url: None,
             version: 0,
+            ..Settings::default()
         };
         assert!(migrate(&mut legacy));
         assert!(legacy.relays.is_empty(), "旧版本自动写入的默认中继应被清掉");

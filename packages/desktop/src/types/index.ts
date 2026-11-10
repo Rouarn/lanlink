@@ -49,6 +49,18 @@ export interface ActiveRoom {
 export interface Settings {
   relays: string[];
   resolver_base_url: string | null;
+  /** Windows：是否已开启计划任务静默提权 */
+  silent_elevate: boolean;
+  /** Windows：首次授权说明是否已经问过一次 */
+  silent_prompted: boolean;
+}
+
+/** 提权方式（Windows 计划任务静默提权） */
+export interface ElevationInfo {
+  platform: string;
+  elevated: boolean;
+  silent: boolean;
+  task_present: boolean;
 }
 
 export interface TunnelStatus {

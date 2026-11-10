@@ -87,3 +87,29 @@ root 的 `$HOME` 是 `/var/root`，直接读默认路径会读不到用户自己
 
 WKWebView 在被其它窗口遮挡时不会绘制，`screencapture -l <windowId>` 截未激活的提权窗口
 会得到一张白图——这是截图假象，不是界面没渲染。提权实例启动时会 `set_focus()` 主动激活窗口。
+
+## 六、Windows：计划任务静默提权（可选）
+
+Windows 没有 macOS 那种「授权一次短期内复用」的机制，唯一能免掉每次 UAC 的做法是
+注册一个「以最高权限运行」的计划任务，之后由任务启动自身（`win_task.rs`）。
+
+任务定义（XML 注册，`schtasks /Create /XML`）：
+
+- 任务名 `LanLink`，不隐藏，用户可在任务计划程序里看到并删除；
+- 触发器：登录时 + 允许按需 `schtasks /Run`；
+- 账户：当前用户，`InteractiveToken` + `RunLevel=HighestAvailable`；
+- 动作：`<安装目录>\LanLink.exe --elevated-run --from-task`，
+  工作目录为 exe 所在目录，保证 `core/<平台>` 的相对查找不受影响。
+
+启动顺序（`lib.rs` 的 `prepare_launch_windows`）：
+
+1. 已经是管理员（任务或 UAC 拉起）：直接起界面；带 `--setup-elevate` 时顺手建任务、落标记；
+2. 未提权且已开标记：让出单实例锁 → `schtasks /Run` → 等新实例写 pid → 自己退出；
+3. 未提权且从未询问过：弹一次说明框，同意则 `runas` 拉起 `--setup-elevate` 实例；
+4. 任何一步失败（UAC 取消、任务被删、被组策略/杀软拦、任务没带来管理员权限）：
+   只写 stderr，按普通权限继续启动，点「连接」时再走一次 UAC，界面功能不受影响。
+
+`MultipleInstancesPolicy=IgnoreNew` 防止任务重复拉起；带 `--from-task` 的实例若仍不是
+管理员，就不会再触发任务，避免进程来回拉起。卸载时由 NSIS 的
+`NSIS_HOOK_PREUNINSTALL`（`windows/installer-hooks.nsh`）删除任务；程序被移动到别的目录后，
+下一次以管理员身份启动会自动按新路径重写任务。

@@ -5,6 +5,8 @@ mod http;
 mod rooms;
 mod settings;
 mod single;
+#[cfg(windows)]
+mod win_task;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
@@ -76,9 +78,116 @@ fn save_settings(relays: String, resolver_base_url: Option<String>) -> Result<Se
         .map(|url| url.trim().to_string())
         .filter(|url| !url.is_empty())
         .map(|url| url.trim_end_matches('/').to_string());
-    let settings = Settings::new(relays, resolver_base_url);
+    // 中继与解析地址之外的状态（Windows 静默提权标记）必须原样保留
+    let existing = Settings::load();
+    let mut settings = Settings::new(relays, resolver_base_url);
+    settings.silent_elevate = existing.silent_elevate;
+    settings.silent_prompted = existing.silent_prompted;
     settings.save()?;
     Ok(settings)
+}
+
+/// 提权方式（Windows 计划任务静默提权 / 其他平台固定启动即提权）。
+#[derive(Serialize)]
+struct ElevationInfo {
+    platform: String,
+    elevated: bool,
+    /// 是否已开启计划任务静默提权
+    silent: bool,
+    /// 计划任务当前是否真的存在（用户可能在任务计划程序里手动删掉）
+    task_present: bool,
+}
+
+#[cfg(windows)]
+fn task_present() -> bool {
+    win_task::task_exists()
+}
+
+#[cfg(not(windows))]
+fn task_present() -> bool {
+    false
+}
+
+fn current_elevation_info() -> ElevationInfo {
+    ElevationInfo {
+        platform: std::env::consts::OS.to_string(),
+        elevated: elevate::is_elevated(),
+        silent: Settings::load().silent_elevate,
+        task_present: task_present(),
+    }
+}
+
+#[tauri::command]
+fn elevation_info() -> ElevationInfo {
+    current_elevation_info()
+}
+
+/// 开启 / 关闭 Windows「计划任务静默提权」。
+#[tauri::command]
+fn set_silent_elevate(enabled: bool) -> Result<ElevationInfo, String> {
+    #[cfg(windows)]
+    return set_silent_elevate_windows(enabled);
+
+    #[cfg(not(windows))]
+    {
+        let _ = enabled;
+        Err("当前平台不支持计划任务静默提权".to_string())
+    }
+}
+
+/// 注册任务需要管理员权限：普通权限下先用 UAC 拉起 `--setup-elevate` 实例接管，
+/// 由它在启动阶段建任务、落标记；失败则保持原状，界面继续可用。
+#[cfg(windows)]
+fn set_silent_elevate_windows(enabled: bool) -> Result<ElevationInfo, String> {
+    if enabled {
+        if !elevate::is_elevated() {
+            single::release();
+            match elevate::relaunch_as_root(&["--setup-elevate".to_string()]) {
+                Ok(()) => {
+                    std::thread::spawn(|| {
+                        if single::wait_for_successor(
+                            Duration::from_secs(120),
+                            &AtomicBool::new(false),
+                        )
+                        .is_some()
+                        {
+                            std::thread::sleep(Duration::from_millis(150));
+                            std::process::exit(0);
+                        }
+                        // 管理员实例没接管：把锁抢回来，当前窗口继续用
+                        let _ = single::acquire();
+                    });
+                    return Ok(current_elevation_info());
+                }
+                Err(err) => {
+                    let _ = single::acquire();
+                    return Err(format!("管理员授权失败：{err}"));
+                }
+            }
+        }
+        install_silent_task()?;
+    } else {
+        if !elevate::is_elevated() {
+            return Err("取消静默提权需要管理员权限，请以管理员身份运行后再试".to_string());
+        }
+        win_task::remove()?;
+        let mut settings = Settings::load();
+        settings.silent_elevate = false;
+        settings.save()?;
+    }
+    Ok(current_elevation_info())
+}
+
+/// 建计划任务并落标记；失败时标记不写，调用方负责回退。
+#[cfg(windows)]
+fn install_silent_task() -> Result<(), String> {
+    let exe = std::env::current_exe().map_err(|err| format!("无法定位可执行文件：{err}"))?;
+    win_task::install(&exe)?;
+    let mut settings = Settings::load();
+    settings.silent_elevate = true;
+    settings.silent_prompted = true;
+    settings.save()?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -307,6 +416,97 @@ fn elevate_at_launch(args: &[String]) {
     }
 }
 
+/// Windows：启动阶段的提权处理（计划任务静默提权 / 首次授权说明）。
+///
+/// 与 macOS 的「拒绝就退出」不同，这里任何失败都只回退到普通权限启动，
+/// 界面照常可用（改中继、看日志不受影响），点「连接」时再走一次 UAC。
+#[cfg(windows)]
+fn prepare_launch_windows(args: &[String]) {
+    let setup = args.iter().any(|arg| arg == "--setup-elevate");
+    let from_task = args.iter().any(|arg| arg == "--from-task");
+
+    // 管理员实例（计划任务或 UAC 拉起）：正常建界面；
+    // `--setup-elevate` 还负责把任务与标记补上，失败也不影响本次使用
+    if elevate::is_elevated() {
+        if setup {
+            if let Err(err) = install_silent_task() {
+                eprintln!("创建计划任务失败：{err}");
+                win_task::warn(&format!(
+                    "LanLink 无法创建计划任务，本次仍可正常使用，但下次启动还会请求管理员授权。\n\n{err}"
+                ));
+            }
+        } else if Settings::load().silent_elevate {
+            // 程序被移动到别的目录后，任务里的路径会失效：管理员实例顺手刷新一次
+            let _ = install_silent_task();
+        }
+        return;
+    }
+
+    // UAC 没能提到管理员：按普通权限启动，不再尝试，避免来回拉起
+    if setup {
+        eprintln!("管理员实例未拿到权限，本次按普通权限启动");
+        return;
+    }
+
+    let settings = Settings::load();
+
+    // 已开启静默提权：交给计划任务以最高权限启动自身
+    if settings.silent_elevate {
+        if !win_task::task_exists() {
+            // 任务被删或创建失败：标记失效，退回「点连接时提权」
+            eprintln!("计划任务已不存在，已关闭静默提权标记");
+            let mut stale = settings.clone();
+            stale.silent_elevate = false;
+            let _ = stale.save();
+            return;
+        }
+        // 任务已经拉起过实例但仍不是管理员（任务被降级/策略限制）：不再重复触发
+        if from_task {
+            eprintln!("计划任务未能提供管理员权限，本次按普通权限启动");
+            return;
+        }
+        if single::acquire().is_err() {
+            return;
+        }
+        // 任务里要拉起新实例，锁必须先让出来
+        single::release();
+        if win_task::run().is_ok()
+            && single::wait_for_successor(Duration::from_secs(30), &AtomicBool::new(false)).is_some()
+        {
+            std::process::exit(0);
+        }
+        eprintln!("计划任务没有接管，本次按普通权限启动");
+        return;
+    }
+
+    // 首次：只问一次，拒绝后不再打扰（设置页随时可以再开）
+    if settings.silent_prompted {
+        return;
+    }
+    if single::acquire().is_err() {
+        return;
+    }
+    let agreed = win_task::confirm_first_time();
+    let mut decided = settings.clone();
+    decided.silent_prompted = true;
+    let _ = decided.save();
+    single::release();
+    if !agreed {
+        return;
+    }
+
+    match elevate::relaunch_as_root(&["--setup-elevate".to_string()]) {
+        Ok(()) => {
+            if single::wait_for_successor(Duration::from_secs(120), &AtomicBool::new(false)).is_some()
+            {
+                std::process::exit(0);
+            }
+            eprintln!("管理员实例没有接管，本次按普通权限启动");
+        }
+        Err(err) => eprintln!("首次授权失败，本次按普通权限启动：{err}"),
+    }
+}
+
 pub fn run() {
     let args: Vec<String> = std::env::args().collect();
     let arg_value = |name: &str| {
@@ -327,6 +527,10 @@ pub fn run() {
     // macOS：主窗口出现之前先解决权限，任何时刻系统里只有一个界面进程
     #[cfg(target_os = "macos")]
     elevate_at_launch(&args);
+
+    // Windows：优先用计划任务静默提权；没有标记时只问一次是否开启
+    #[cfg(windows)]
+    prepare_launch_windows(&args);
 
     // 单实例：只允许一个界面进程（提权后的管理员实例会接着持有这把锁）
     if let Err(err) = single::acquire() {
@@ -353,6 +557,8 @@ pub fn run() {
             get_status,
             get_settings,
             save_settings,
+            elevation_info,
+            set_silent_elevate,
             create_room,
             resolve_code,
             export_room_code,
