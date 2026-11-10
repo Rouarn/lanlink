@@ -51,7 +51,7 @@ use std::fs::OpenOptions;
 use std::io::{self, Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream, UdpSocket};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -85,6 +85,14 @@ const TICK: Duration = Duration::from_millis(200);
 const MAX_PACKET: usize = 2048;
 /// 报文没写端口时的默认值（原版「对局域网开放」默认端口）。
 const DEFAULT_PORT: u16 = 25565;
+/// 连接对端世界端口的单次超时。
+const CONNECT_TIMEOUT: Duration = Duration::from_millis(600);
+/// 客户端连进来、但我们连不上对端时的重试次数（总耗时约 2 秒）。
+const CONNECT_ATTEMPTS: u32 = 3;
+/// 探测对端世界端口是否可达的超时。
+const PROBE_TIMEOUT: Duration = Duration::from_millis(800);
+/// 对端不可达时的探测间隔：世界重开、overlay 重连都会让端口短暂不可达。
+const PROBE_RETRY: Duration = Duration::from_secs(3);
 
 // ---------------------------------------------------------------------------
 // 报文
@@ -297,6 +305,15 @@ pub(crate) fn is_private(ip: Ipv4Addr) -> bool {
 struct Forward {
     port: u16,
     motd: String,
+    target: Ipv4Addr,
+    target_port: u16,
+    /// 对端世界端口当前是否可达。不可达时不播公告：宁可列表里没有，
+    /// 也不留一个点进去就断的地址；恢复后沿用同一个本地端口重新播。
+    healthy: Arc<AtomicBool>,
+    /// 客户端连接连续连不上对端的次数，成功一次就清零。
+    fail_streak: Arc<AtomicU32>,
+    /// 上次探测对端的时间（只在 `reconcile` 线程里读写）
+    probed_at: Instant,
     /// 这个世界从对端宣告里消失的时间：宽限期内保留端口，回来就继续用同一个端口。
     missing_since: Option<Instant>,
     stop: Arc<AtomicBool>,
@@ -315,20 +332,62 @@ impl Forward {
         listener.set_nonblocking(true)?;
         let stop = Arc::new(AtomicBool::new(false));
 
+        // 先探一次目标：条目一旦出现在列表里，点进去就该能通。连不上就先不播，
+        // 由 `reconcile` 每 `PROBE_RETRY` 重试，避免把死地址摆给用户。
+        let healthy = Arc::new(AtomicBool::new(match probe(target, target_port) {
+            Ok(()) => true,
+            Err(err) => {
+                log_to(
+                    &log,
+                    "WARN",
+                    &format!(
+                        "对端 {target}:{target_port} 暂时连不上（{err}），本地端口 {port} 先不播条目，每 {} 秒重试",
+                        PROBE_RETRY.as_secs()
+                    ),
+                );
+                false
+            }
+        }));
+        let fail_streak = Arc::new(AtomicU32::new(0));
+
         let flag = stop.clone();
-        // 只记录这个转发上的第一条连接结果：正常玩游戏时条目在列表里，点进去失败
-        // 只可能是「没连上我们」或「我们连不上对端」，这两句日志能直接区分。
-        let reported = Arc::new(AtomicBool::new(false));
+        let log_path = log.clone();
+        let healthy_thread = healthy.clone();
+        let streak_thread = fail_streak.clone();
+        // 每条连接的结果都要能查：客户端那边只会显示「无法连接至服务器 / 连接中断」，
+        // 到底是「没连到我们」还是「我们连不上对端」，只能靠这里的日志区分。
+        let logged_accept = Arc::new(AtomicBool::new(false));
         let handle = thread::spawn(move || {
             while !flag.load(Ordering::Relaxed) {
                 match listener.accept() {
-                    Ok((stream, _)) => {
+                    Ok((stream, addr)) => {
                         let _ = stream.set_nodelay(true);
-                        let first = !reported.swap(true, Ordering::Relaxed);
-                        let log = log.clone();
+                        let first = !logged_accept.swap(true, Ordering::Relaxed);
+                        if first {
+                            log_to(
+                                &log_path,
+                                "INFO",
+                                &format!(
+                                    "本地转发端口 {port} 收到连接（来自 {addr}），开始连接对端 {target}:{target_port}"
+                                ),
+                            );
+                        }
+                        let log = log_path.clone();
+                        let healthy = healthy_thread.clone();
+                        let fail_streak = streak_thread.clone();
+                        let logged_accept = logged_accept.clone();
                         // 每条连接单独一个线程：MC 是长连接，互不阻塞
                         thread::spawn(move || {
-                            pipe(stream, target, target_port, port, &log, first)
+                            pipe(
+                                stream,
+                                target,
+                                target_port,
+                                port,
+                                &log,
+                                &healthy,
+                                &fail_streak,
+                                &logged_accept,
+                            )
                         });
                     }
                     Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
@@ -343,12 +402,32 @@ impl Forward {
         Ok(Self {
             port,
             motd,
+            target,
+            target_port,
+            healthy,
+            fail_streak,
+            probed_at: Instant::now(),
             missing_since: None,
             stop,
             handle: Some(handle),
         })
     }
+
+    fn is_healthy(&self) -> bool {
+        self.healthy.load(Ordering::Relaxed)
+    }
 }
+
+/// 探一下对端世界端口能不能连上，连上立刻关掉（原版服务端能正常处理）。
+fn probe(target: Ipv4Addr, target_port: u16) -> io::Result<()> {
+    let stream = TcpStream::connect_timeout(
+        &SocketAddr::from((target, target_port)),
+        PROBE_TIMEOUT,
+    )?;
+    drop(stream);
+    Ok(())
+}
+
 
 impl Drop for Forward {
     fn drop(&mut self) {
@@ -362,42 +441,74 @@ impl Drop for Forward {
 
 /// 双向转发一条连接，任一端断开就收尾。
 ///
-/// `report` 为真时（每个转发端口的第一条连接）把结果写进日志：连不上对端时
-/// 客户端那边只会看到「连接已断开」，原因必须留在本机日志里。
+/// 连不上对端时做短重试（`CONNECT_ATTEMPTS` 次、总计约 2 秒）：EasyTier 的 overlay
+/// 在对端重连、网卡切换时会短暂不通，一次失败就把客户端踢掉会让用户看到
+/// 「无法连接至服务器 / 连接中断」。重试仍失败才放弃，并把原因写进日志。
+#[allow(clippy::too_many_arguments)]
 fn pipe(
     client: TcpStream,
     target: Ipv4Addr,
     target_port: u16,
     local_port: u16,
     log: &std::path::Path,
-    report: bool,
+    healthy: &AtomicBool,
+    fail_streak: &AtomicU32,
+    logged_accept: &AtomicBool,
 ) {
-    let server = match TcpStream::connect_timeout(
-        &SocketAddr::from((target, target_port)),
-        Duration::from_secs(5),
-    ) {
-        Ok(stream) => stream,
-        Err(err) => {
-            if report {
+    let addr = SocketAddr::from((target, target_port));
+    let mut last_err = None;
+    let mut server = None;
+    for attempt in 1..=CONNECT_ATTEMPTS {
+        match TcpStream::connect_timeout(&addr, CONNECT_TIMEOUT) {
+            Ok(stream) => {
+                log_to(
+                    log,
+                    "INFO",
+                    &format!(
+                        "本地转发端口 {local_port} 已连上对端 {target}:{target_port}（第 {attempt} 次尝试）"
+                    ),
+                );
+                server = Some(stream);
+                break;
+            }
+            Err(err) => {
                 log_to(
                     log,
                     "WARN",
                     &format!(
-                        "本地转发端口 {local_port} 连接对端 {target}:{target_port} 失败：{err}"
+                        "本地转发端口 {local_port} 第 {attempt}/{CONNECT_ATTEMPTS} 次连接对端 {target}:{target_port} 失败：{err}"
                     ),
                 );
+                last_err = Some(err);
+                if attempt < CONNECT_ATTEMPTS {
+                    thread::sleep(Duration::from_millis(200 + 200 * u64::from(attempt)));
+                }
             }
-            return;
         }
-    };
-    if report {
+    }
+    let Some(server) = server else {
+        // 连着几次都连不上：先停止播这个条目，免得列表里留一个点了就断的地址；
+        // `reconcile` 会继续探测，对端一恢复就重新播（本地端口不变）。
+        let streak = fail_streak.fetch_add(1, Ordering::Relaxed) + 1;
+        healthy.store(false, Ordering::Relaxed);
+        // 下一次连接再来时重新记一条「收到连接」，方便定位问题
+        logged_accept.store(false, Ordering::Relaxed);
+        let reason = last_err
+            .map(|err| err.to_string())
+            .unwrap_or_else(|| "未知错误".to_string());
         log_to(
             log,
-            "INFO",
-            &format!("本地转发端口 {local_port} 已连上对端 {target}:{target_port}"),
+            "WARN",
+            &format!(
+                "本地转发端口 {local_port} 连续 {streak} 次连不上对端 {target}:{target_port}（{reason}），暂停播这个条目"
+            ),
         );
-    }
+        return;
+    };
+    fail_streak.store(0, Ordering::Relaxed);
+    healthy.store(true, Ordering::Relaxed);
     let _ = server.set_nodelay(true);
+
     let (Ok(mut client_read), Ok(mut server_write)) = (client.try_clone(), server.try_clone())
     else {
         return;
@@ -859,13 +970,15 @@ fn reconcile(
                     .lock()
                     .unwrap()
                     .insert((forward.port, announced_motd(&forward.motd, forward.port)));
-                shared.log(
-                    "INFO",
-                    &format!(
-                        "对端 {} 的世界端口 {} 已就绪：本机转发 端口 {}",
-                        world.ip, world.port, forward.port
-                    ),
-                );
+                if forward.is_healthy() {
+                    shared.log(
+                        "INFO",
+                        &format!(
+                            "对端 {} 的世界端口 {} 已就绪：本机转发 端口 {}",
+                            world.ip, world.port, forward.port
+                        ),
+                    );
+                }
                 forwards.insert(key, forward);
             }
             Err(err) => shared.log_once(
@@ -918,11 +1031,25 @@ fn reconcile(
 
         match forward.missing_since {
             None => {
+                // 先探一下目标端口：世界关掉 / 重开都会换端口，旧端口随之关闭。
+                // 这种情况必须立刻撤条目，不能留一个「点进去就断」的地址等宽限期。
+                if let Err(err) = probe(forward.target, forward.target_port) {
+                    shared.log(
+                        "INFO",
+                        &format!(
+                            "对端 {}:{} 的端口已关闭（{err}），立即移除本地转发端口 {}",
+                            key.0, key.1, forward.port
+                        ),
+                    );
+                    remove.push((*key, "对端世界端口已不可达"));
+                    continue;
+                }
                 forward.missing_since = Some(now);
+                forward.probed_at = now;
                 shared.log(
                     "WARN",
                     &format!(
-                        "对端 {}:{} 从宣告里消失（{}），先保留本地转发端口 {}，{} 秒内恢复就继续用",
+                        "对端 {}:{} 从宣告里消失（{}），端口仍可连，先保留本地转发端口 {}，{} 秒内恢复就继续用",
                         key.0,
                         key.1,
                         if reachable {
@@ -959,8 +1086,39 @@ fn reconcile(
         }
     }
 
+    // 目标不可达的转发：暂停播条目，按 `PROBE_RETRY` 探测，恢复了再播。
+    // 本地端口始终不变，所以恢复后列表里还是同一个 IP:端口，不会留下旧地址。
+    for (key, forward) in forwards.iter_mut() {
+        if forward.is_healthy() || forward.probed_at.elapsed() < PROBE_RETRY {
+            continue;
+        }
+        forward.probed_at = Instant::now();
+        match probe(forward.target, forward.target_port) {
+            Ok(()) => {
+                forward.healthy.store(true, Ordering::Relaxed);
+                forward.fail_streak.store(0, Ordering::Relaxed);
+                shared.log(
+                    "INFO",
+                    &format!(
+                        "对端 {}:{} 已恢复，重新播本地转发端口 {}",
+                        key.0, key.1, forward.port
+                    ),
+                );
+            }
+            Err(err) => shared.log_once(
+                &format!("unreachable-{}-{}", key.0, key.1),
+                "WARN",
+                &format!(
+                    "对端 {}:{} 仍不可达（{err}），继续暂停本地转发端口 {}",
+                    key.0, key.1, forward.port
+                ),
+            ),
+        }
+    }
+
     let mut announce: Vec<Announcement> = forwards
         .values()
+        .filter(|forward| forward.is_healthy())
         .map(|forward| Announcement {
             motd: forward.motd.clone(),
             port: forward.port,
@@ -1522,5 +1680,37 @@ mod tests {
         drop(forward);
         // 停止后端口必须能重新绑定，说明没有残留监听
         TcpListener::bind((Ipv4Addr::UNSPECIFIED, port)).expect("转发停止后端口没有释放");
+    }
+
+    #[test]
+    fn forward_is_unhealthy_when_target_port_is_closed() {
+        // 先占一个端口再放掉，确保它没人监听
+        let closed = {
+            let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+            listener.local_addr().unwrap().port()
+        };
+        let forward = Forward::start(
+            Ipv4Addr::LOCALHOST,
+            closed,
+            "Closed".to_string(),
+            PathBuf::from("/dev/null"),
+        )
+        .expect("分配本地端口失败");
+        assert!(
+            !forward.is_healthy(),
+            "目标端口已关闭时不能把条目播给客户端"
+        );
+
+        // 目标可达时才算健康
+        let echo = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let echo_port = echo.local_addr().unwrap().port();
+        let reachable = Forward::start(
+            Ipv4Addr::LOCALHOST,
+            echo_port,
+            "Reachable".to_string(),
+            PathBuf::from("/dev/null"),
+        )
+        .expect("分配本地端口失败");
+        assert!(reachable.is_healthy(), "目标端口可达时应当立即播条目");
     }
 }
