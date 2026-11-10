@@ -5,6 +5,7 @@ import StatusDot from "../ui/StatusDot.vue";
 import { useRooms } from "../../composables/useRooms";
 import { useTunnel } from "../../composables/useTunnel";
 import { roleLabel, stateLabel } from "../../lib/labels";
+import { busy } from "../../stores/app";
 import type { ActiveRoom } from "../../types";
 
 defineProps<{
@@ -16,6 +17,8 @@ defineProps<{
   /** 是否已配置解析服务地址 */
   resolverConfigured: boolean;
 }>();
+
+defineEmits<{ disconnect: [] }>();
 
 const {
   longCode,
@@ -86,6 +89,14 @@ const { status, state } = useTunnel();
     </InfoRow>
     <InfoRow label="直连数量">
       <span class="row-value">{{ status?.direct_peer_count ?? 0 }}</span>
+    </InfoRow>
+    <!-- 断开入口放在卡片里，连上之后不用再往下找 -->
+    <InfoRow v-if="status?.running">
+      <div class="row-actions">
+        <button class="btn-secondary" :disabled="busy" @click="$emit('disconnect')">
+          {{ busy ? "处理中…" : "断开连接" }}
+        </button>
+      </div>
     </InfoRow>
   </SectionCard>
 </template>

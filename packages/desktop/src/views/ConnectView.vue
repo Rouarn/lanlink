@@ -9,9 +9,15 @@ import { useSettings } from "../composables/useSettings";
 import { useTunnel } from "../composables/useTunnel";
 import { activeTab, busy, message } from "../stores/app";
 
-const { room, recent, preview, activeRoom } = useRooms();
+const { room, recent, preview, activeRoom, resetActiveRoom } = useRooms();
 const { configured, resolverUrl } = useSettings();
 const { status, state, running, pending, connect, disconnect } = useTunnel();
+
+/** 断开连接：停 core、回到未连接；最近房间记录保留。 */
+async function handleDisconnect(): Promise<void> {
+  await disconnect();
+  resetActiveRoom();
+}
 </script>
 
 <template>
@@ -35,6 +41,7 @@ const { status, state, running, pending, connect, disconnect } = useTunnel();
     :shared="Boolean(room?.shared)"
     :exportable="Boolean(room)"
     :resolver-configured="Boolean(resolverUrl)"
+    @disconnect="handleDisconnect"
   />
 
   <RecentRoomsCard v-if="recent.length" :rooms="recent" />
@@ -55,10 +62,4 @@ const { status, state, running, pending, connect, disconnect } = useTunnel();
   <p v-if="!running && state !== 'failed'" class="footnote">
     首次连接会请求管理员授权：macOS 创建虚拟网卡需要 root 权限。
   </p>
-
-  <div v-if="running" class="actions">
-    <button class="btn-secondary" :disabled="busy" @click="disconnect">
-      {{ busy ? "处理中…" : "断开连接" }}
-    </button>
-  </div>
 </template>

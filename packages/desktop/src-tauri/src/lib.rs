@@ -344,7 +344,7 @@ pub fn run() {
         .find(|pair| pair[0] == "--room")
         .map(|pair| pair[1].clone());
 
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .manage(AppState {
             tunnel: Mutex::new(Tunnel::new()),
         })
@@ -364,6 +364,14 @@ pub fn run() {
             read_logs,
             clear_logs
         ])
+        // 点红叉等同于退出：先停 core 再退出，
+        // 否则 core 会脱离界面继续占着虚拟网卡与 15888 / 11010-11013
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { .. } = event {
+                stop_core(window.app_handle());
+                window.app_handle().exit(0);
+            }
+        })
         .setup(move |app| {
             // 提权实例由系统授权进程拉起，窗口可能落在别的窗口后面（被遮挡时 WebView 不绘制），
             // 这里主动激活一次，保证交接后用户立刻看到界面
@@ -401,6 +409,20 @@ pub fn run() {
             });
             Ok(())
         })
-        .run(tauri::generate_context!())
+        .build(tauri::generate_context!())
         .expect("LanLink 启动失败");
+
+    // Cmd+Q / 系统退出同样要把 core 一起带走，避免孤儿 core 继续占着端口
+    app.run(|handle, event| {
+        if let tauri::RunEvent::Exit = event {
+            stop_core(handle);
+        }
+    });
+}
+
+/// 退出前停掉 core：回收子进程与端口，避免留下孤儿进程。
+fn stop_core(handle: &tauri::AppHandle) {
+    if let Some(state) = handle.try_state::<AppState>() {
+        state.tunnel.lock().unwrap().stop();
+    }
 }

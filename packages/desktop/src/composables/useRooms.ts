@@ -162,6 +162,11 @@ async function clearRooms(): Promise<void> {
   }
 }
 
+/** 断开后清掉「当前房间」卡片，界面回到未连接；最近房间列表不受影响。 */
+function resetActiveRoom(): void {
+  room.value = null;
+}
+
 export function useRooms() {
   return {
     room,
@@ -185,5 +190,6 @@ export function useRooms() {
     reconnect,
     removeRoom,
     clearRooms,
+    resetActiveRoom,
   };
 }
