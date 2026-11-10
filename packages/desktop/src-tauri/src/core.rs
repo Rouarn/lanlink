@@ -111,6 +111,10 @@ impl Tunnel {
         let log_dir = log_dir();
         let _ = fs::create_dir_all(&log_dir);
         let (core, cli) = resolve_binaries();
+        match &core {
+            Some(path) => eprintln!("[lanlink] easytier-core: {}", path.display()),
+            None => eprintln!("[lanlink] 未找到 easytier-core，已查找：{:?}", candidate_dirs()),
+        }
         let tunnel = Self {
             core,
             cli,
@@ -888,7 +892,38 @@ fn candidate_dirs() -> Vec<PathBuf> {
     let platform = platform_dir();
     let mut dirs = Vec::new();
 
-    // 开发态：packages/core/<platform>
+    // 打包态优先：安装后的 app 必须用包内的 core，不能落到构建机上的仓库路径
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(exe_dir) = exe.parent() {
+            #[cfg(target_os = "macos")]
+            {
+                // macOS 的 bundle 资源在 Contents/Resources：LanLink.app/Contents/Resources/core/<平台>
+                dirs.push(
+                    exe_dir
+                        .join("..")
+                        .join("Resources")
+                        .join("core")
+                        .join(platform),
+                );
+                dirs.push(
+                    exe_dir
+                        .join("..")
+                        .join("Resources")
+                        .join("resources")
+                        .join("core")
+                        .join(platform),
+                );
+            }
+            // Windows 的 resource_dir 就是 exe 所在目录：<安装目录>/core/<平台>
+            #[cfg(windows)]
+            {
+                dirs.push(exe_dir.join("core").join(platform));
+                dirs.push(exe_dir.join("resources").join("core").join(platform));
+            }
+        }
+    }
+
+    // 开发态兜底：仓库里的 packages/core/<platform>（tauri dev 时没有包内资源）
     dirs.push(
         Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("..")
@@ -896,31 +931,6 @@ fn candidate_dirs() -> Vec<PathBuf> {
             .join("core")
             .join(platform),
     );
-
-    // 打包态：可执行文件同级的 resources/core 或 .app/Contents/Resources 下
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(exe_dir) = exe.parent() {
-            // Windows 的资源目录就是 exe 所在目录（安装包把 core 拷到 <安装目录>/core）
-            #[cfg(windows)]
-            dirs.push(exe_dir.join("core").join(platform));
-            dirs.push(exe_dir.join("resources").join("core").join(platform));
-            dirs.push(
-                exe_dir
-                    .join("..")
-                    .join("Resources")
-                    .join("resources")
-                    .join("core")
-                    .join(platform),
-            );
-            dirs.push(
-                exe_dir
-                    .join("..")
-                    .join("Resources")
-                    .join("core")
-                    .join(platform),
-            );
-        }
-    }
 
     dirs
 }

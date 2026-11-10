@@ -228,7 +228,7 @@ pub fn create(
     }
 
     let mut room = Room {
-        network: network_from(&slug, &code),
+        network: network_from(&code),
         secret: derive_secret(&code),
         name: name.to_string(),
         code,
@@ -251,7 +251,7 @@ pub fn create(
                 Err(crate::http::HttpError::Status(409)) => {
                     let tail = random_tail();
                     room.code = format!("{slug}-{tail}");
-                    room.network = network_from(&slug, &room.code);
+                    room.network = network_from(&room.code);
                     room.secret = derive_secret(&room.code);
                 }
                 Err(_) => break,
@@ -431,10 +431,11 @@ fn register(room: &Room, base: &str, token: Option<&str>) -> Result<(), crate::h
     crate::http::post_json(base, "/r", token, &payload, REMOTE_TIMEOUT).map(|_| ())
 }
 
-fn network_from(slug: &str, code: &str) -> String {
+/// 网络名统一用 `lanlink-` 前缀，便于中继白名单只放行 LanLink 自己的网络。
+/// 后缀沿用房间码里的随机段，保证每个房间的网络名仍然唯一。
+fn network_from(code: &str) -> String {
     format!(
-        "{}-{}",
-        slug.to_lowercase(),
+        "lanlink-{}",
         code.rsplit('-').next().unwrap_or("0").to_lowercase()
     )
 }
@@ -522,6 +523,16 @@ fn now() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn network_names_use_lanlink_prefix() {
+        let network = network_from("ROOM-8K3M");
+        assert_eq!(network, "lanlink-8k3m");
+        // 只包含小写字母、数字和连字符，避免 EasyTier 网络名非法
+        assert!(network
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'));
+    }
 
     /// 本地自测：先起服务，再跑
     /// `cargo test local_resolver_selfcheck -- --ignored --nocapture`

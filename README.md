@@ -80,7 +80,8 @@ pnpm install
   macOS 用 `AuthorizationExecuteWithPrivileges`，Windows 用 `ShellExecuteExW` + `runas`
   （UAC 点「否」会提示「你取消了管理员授权，本次未连接」，原窗口继续可用）。
 - 中继服务器在「设置 → 运行环境」里由用户自己填写，程序不内置任何默认地址；
-  未填写时创建/加入不可用。网络名、密钥随房间生成，不在代码里写死。
+  未填写时创建/加入不可用。网络名、密钥随房间生成，不在代码里写死；
+  网络名统一为 `lanlink-xxxx`，中继白名单可以只放行 `lanlink-*`。
 - 短码解析服务有一个内置默认地址（常量在 `src-tauri/src/settings.rs` 的
   `DEFAULT_RESOLVER_BASE_URL`），新装即可解析短码；设置页可改成自己的地址并一键恢复默认。
   地址支持 `http://`（本地调试）与 `https://`（rustls 握手、默认校验证书，没有跳过校验的开关）。
