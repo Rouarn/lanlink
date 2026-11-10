@@ -125,10 +125,17 @@ jobs:
           Invoke-WebRequest -Uri $url -OutFile $zip
           Expand-Archive -Path $zip -DestinationPath (Join-Path $env:RUNNER_TEMP "easytier") -Force
           $root = Join-Path $env:RUNNER_TEMP "easytier"
-          # core/cli 之外还要带上 wintun.dll 等运行期依赖，否则创建 TUN 网卡会失败。
-          Get-ChildItem -Recurse $root -File |
-            Where-Object { $_.Name -notlike "easytier-web*" } |
-            ForEach-Object { Copy-Item $_.FullName (Join-Path $dest $_.Name) -Force }
+          # 只带运行必需的三个文件：core / cli / wintun.dll（创建 TUN 网卡用）。
+          # 不打包 WinDivert64.sys、Packet.dll：LanLink 没有启用 EasyTier 的
+          # --enable-udp-broadcast-relay（广播转发由 broadcast.rs 自己实现），
+          # 这个内核驱动既用不到，又会被杀软/驱动保护拦截，导致 NSIS 安装时
+          # 报 "Error opening file for writing: ...\WinDivert64.sys" 直接中断。
+          $needed = @("easytier-core.exe", "easytier-cli.exe", "wintun.dll")
+          foreach ($name in $needed) {
+            $src = Get-ChildItem -Recurse $root -File -Filter $name | Select-Object -First 1
+            if (-not $src) { throw "$name 未在 EasyTier 发布包中找到" }
+            Copy-Item $src.FullName (Join-Path $dest $name) -Force
+          }
           Get-ChildItem $dest | Format-Table Name, Length
           if (-not (Test-Path "$dest/easytier-core.exe")) { throw "easytier-core.exe 未就位" }
 
