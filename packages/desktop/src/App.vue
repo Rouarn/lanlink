@@ -9,7 +9,7 @@ import SettingsView from "./views/SettingsView.vue";
 import { useRooms } from "./composables/useRooms";
 import { useSettings } from "./composables/useSettings";
 import { useTunnel } from "./composables/useTunnel";
-import { activeTab, loadAppInfo } from "./stores/app";
+import { activeTab, loadAppInfo, info } from "./stores/app";
 
 const { refresh, startPolling, stopPolling } = useTunnel();
 const { loadSettings } = useSettings();
@@ -17,6 +17,11 @@ const { loadRecent } = useRooms();
 
 onMounted(async () => {
   await loadAppInfo();
+  // Windows 没有 macOS 的 vibrancy 材质，半透明区域会透出桌面，
+  // 把平台标到 <html> 上，由 CSS 给 Windows 补不透明背景
+  if (info.value?.platform) {
+    document.documentElement.dataset.platform = info.value.platform;
+  }
   await loadSettings();
   await loadRecent();
   await refresh();

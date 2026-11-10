@@ -7,6 +7,16 @@
   border: 0.5px solid var(--separator);
 }
 
+/* Windows 没有 macOS 的 vibrancy 材质，透明窗口里若根容器不带背景，
+   半透明的侧边栏会直接透出桌面。这里给窗口根容器补不透明背景，
+   侧边栏的半透明 tint 叠在上面仍能保留层次，但不会穿到桌面。 */
+[data-platform="windows"] .window {
+  background: var(--window-bg);
+}
+[data-platform="windows"] .sidebar {
+  background: var(--group-bg);
+}
+
 /* 侧边栏：半透明材质，叠一层淡色以收敛透过来的壁纸 */
 .sidebar {
   width: 212px;
