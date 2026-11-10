@@ -1,68 +1,24 @@
 <script setup lang="ts">
-import { onMounted, onUnmounted, ref, watch } from "vue";
+import { computed, onMounted, ref, watch } from "vue";
 import { useApp } from "../../stores/app";
 import { useRooms } from "../../stores/rooms";
 import { kindLabel } from "../../lib/labels";
-import { looksLikeRoomCode } from "../../lib/roomCode";
 import AppIcon from "../../components/ui/AppIcon.vue";
 
-const { goRoom, toast } = useApp();
+const { goRoom, platform } = useApp();
 const { joinCode, preview, previewCode, previewError, lookup, join } = useRooms();
 
-const fromClipboard = ref(false);
+const codeInput = ref<HTMLTextAreaElement | null>(null);
+
+/** macOS 15+ 只有用户自己按键粘贴才不弹授权框，所以不做任何主动读取 */
+const pasteHint = computed(() => (platform.value === "win" ? "Ctrl+V 粘贴" : "⌘V 粘贴"));
 
 watch(joinCode, (value) => {
   if (preview.value && value.trim() !== previewCode.value) preview.value = null;
-  if (!value.trim()) fromClipboard.value = false;
 });
-
-/** 读剪贴板，只在看起来是房间码时返回；任何失败都当作没有，不打扰用户 */
-async function readCode(): Promise<string | null> {
-  try {
-    const text = (await navigator.clipboard.readText()).trim();
-    return looksLikeRoomCode(text) ? text : null;
-  } catch {
-    return null;
-  }
-}
-
-/** 进页面与窗口重新获得焦点时自动读一次；已有输入绝不覆盖 */
-async function autoFill(): Promise<void> {
-  if (joinCode.value.trim()) return;
-  const code = await readCode();
-  if (!code || joinCode.value.trim()) return;
-  joinCode.value = code;
-  fromClipboard.value = true;
-}
-
-async function paste(): Promise<void> {
-  const text = (await navigator.clipboard.readText().catch(() => "")).trim();
-  if (!text) {
-    toast("剪贴板里没有内容，手动粘贴一下");
-    return;
-  }
-  joinCode.value = text;
-  fromClipboard.value = false;
-  toast("已粘贴房间码");
-}
-
-function onWindowFocus(): void {
-  void autoFill();
-}
-
-function onVisibility(): void {
-  if (!document.hidden) void autoFill();
-}
 
 onMounted(() => {
-  void autoFill();
-  window.addEventListener("focus", onWindowFocus);
-  document.addEventListener("visibilitychange", onVisibility);
-});
-
-onUnmounted(() => {
-  window.removeEventListener("focus", onWindowFocus);
-  document.removeEventListener("visibilitychange", onVisibility);
+  codeInput.value?.focus();
 });
 </script>
 
@@ -80,20 +36,17 @@ onUnmounted(() => {
       <label class="field">
         <span class="field-label">房间码</span>
         <textarea
+          ref="codeInput"
           v-model="joinCode"
           class="code-input"
           placeholder="ROOM-8K3M 或 LL1. 开头的完整码"
           rows="3"
           spellcheck="false"
         />
-        <span v-if="fromClipboard" class="field-hint clipboard-hint">已从剪贴板读取</span>
+        <span class="field-hint">在输入框里按 {{ pasteHint }}。</span>
       </label>
 
       <div class="form-actions">
-        <button type="button" class="btn btn-secondary btn-sm" @click="paste">
-          <AppIcon name="copy" :size="14" />
-          从剪贴板粘贴
-        </button>
         <button
           type="button"
           class="btn btn-secondary btn-sm"
@@ -149,10 +102,6 @@ onUnmounted(() => {
 <style scoped>
 .back {
   margin-bottom: 14px;
-}
-
-.clipboard-hint {
-  color: var(--ok);
 }
 
 h1 {

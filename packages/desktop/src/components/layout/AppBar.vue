@@ -50,7 +50,8 @@ const { view, go, goRoom, openDrawer } = useApp();
   padding-right: 20px;
   flex: none;
   border-bottom: 1px solid var(--border);
-  background: transparent;
+  /* 与内容区同底，避免 macOS 上顶部只剩窗口玻璃、显得比下半部分更灰 */
+  background: var(--glass-content);
   user-select: none;
   -webkit-user-select: none;
 }
