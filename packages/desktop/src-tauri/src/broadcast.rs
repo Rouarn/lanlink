@@ -46,8 +46,6 @@ use crate::lan;
 const VERSION: u32 = 1;
 /// `(端口, 哈希)` 去重窗口：够挡住自己的回灌，又不会误杀正常的连续请求。
 const DEDUPE_TTL: Duration = Duration::from_secs(2);
-/// 对端列表刷新间隔。
-const PEER_REFRESH: Duration = Duration::from_secs(5);
 /// 单端口读超时 / 主循环步长。
 const TICK: Duration = Duration::from_millis(200);
 const MAX_PACKET: usize = 4096;
@@ -133,12 +131,11 @@ fn hash(port: u16, payload: &[u8]) -> (u16, u64) {
 }
 
 struct Shared {
-    cli: Option<PathBuf>,
-    portal: String,
     log: PathBuf,
     stop: AtomicBool,
     self_ips: Vec<Ipv4Addr>,
-    peers: Mutex<Vec<Ipv4Addr>>,
+    /// 对端虚拟 IP：由 `core` 统一轮询 `easytier-cli peer` 后写入
+    peers: Arc<Mutex<Vec<Ipv4Addr>>>,
     seen: Mutex<HashMap<(u16, u64), Instant>>,
     logged: Mutex<HashSet<String>>,
     error: Mutex<Option<String>>,
@@ -203,10 +200,9 @@ pub struct BroadcastRelay {
 
 impl BroadcastRelay {
     pub fn start(
-        cli: Option<PathBuf>,
-        portal: String,
         ports: &[u16],
         log: PathBuf,
+        peers: Arc<Mutex<Vec<Ipv4Addr>>>,
     ) -> Result<Self, String> {
         let ports = normalize_ports(ports);
         if ports.is_empty() {
@@ -214,12 +210,10 @@ impl BroadcastRelay {
         }
         let self_ips = lan::local_ipv4s();
         let shared = Arc::new(Shared {
-            cli,
-            portal,
             log,
             stop: AtomicBool::new(false),
             self_ips,
-            peers: Mutex::new(Vec::new()),
+            peers,
             seen: Mutex::new(HashMap::new()),
             logged: Mutex::new(HashSet::new()),
             error: Mutex::new(None),
@@ -244,10 +238,6 @@ impl BroadcastRelay {
         }
 
         let mut handles = Vec::new();
-        {
-            let shared = shared.clone();
-            handles.push(thread::spawn(move || refresh_loop(shared)));
-        }
         for state in states {
             let shared = shared.clone();
             handles.push(thread::spawn(move || port_loop(shared, state)));
@@ -267,12 +257,19 @@ impl BroadcastRelay {
         Ok(Self { shared, handles })
     }
 
+    /// 线程是否都还在跑：`JoinHandle` 已结束（panic 或异常退出）也算不存活。
     pub fn alive(&self) -> bool {
-        !self.shared.stopped()
+        !self.shared.stopped() && !self.handles.iter().any(|handle| handle.is_finished())
     }
 
     pub fn error(&self) -> Option<String> {
-        self.shared.error.lock().unwrap().clone()
+        if let Some(error) = self.shared.error.lock().unwrap().clone() {
+            return Some(error);
+        }
+        if !self.shared.stopped() && self.handles.iter().any(|handle| handle.is_finished()) {
+            return Some("UDP 广播转发线程意外退出（可能发生 panic），已停止".to_string());
+        }
+        None
     }
 
     pub fn stop(&mut self) {
@@ -301,20 +298,6 @@ fn bind(port: u16) -> io::Result<UdpSocket> {
     let socket: UdpSocket = socket.into();
     socket.set_nonblocking(true)?;
     Ok(socket)
-}
-
-/// 每 5 秒刷新对端虚拟 IP（与 lan 的中继共用 `easytier-cli` 查询方式）。
-fn refresh_loop(shared: Arc<Shared>) {
-    while !shared.stopped() {
-        let peers = lan::peers_from_cli(shared.cli.as_deref(), &shared.portal);
-        *shared.peers.lock().unwrap() = peers;
-        for _ in 0..(PEER_REFRESH.as_millis() / TICK.as_millis()) {
-            if shared.stopped() {
-                return;
-            }
-            thread::sleep(TICK);
-        }
-    }
 }
 
 fn port_loop(shared: Arc<Shared>, mut state: Port) {
@@ -452,12 +435,10 @@ mod tests {
     #[test]
     fn dedupe_window_expires() {
         let shared = Shared {
-            cli: None,
-            portal: String::new(),
             log: std::env::temp_dir().join("lanlink-bcast-test.log"),
             stop: AtomicBool::new(false),
             self_ips: Vec::new(),
-            peers: Mutex::new(Vec::new()),
+            peers: Arc::new(Mutex::new(Vec::new())),
             seen: Mutex::new(HashMap::new()),
             logged: Mutex::new(HashSet::new()),
             error: Mutex::new(None),
@@ -477,8 +458,12 @@ mod tests {
     fn relay_releases_ports_on_stop() {
         // 用高位端口，避免和真机上的游戏冲突
         let port = 45_123u16;
-        let mut relay = BroadcastRelay::start(None, String::new(), &[port], std::env::temp_dir().join("lanlink-bcast-test.log"))
-            .expect("启动广播转发失败");
+        let mut relay = BroadcastRelay::start(
+            &[port],
+            std::env::temp_dir().join("lanlink-bcast-test.log"),
+            Arc::new(Mutex::new(Vec::new())),
+        )
+        .expect("启动广播转发失败");
         assert!(relay.alive());
         relay.stop();
         assert!(!relay.alive());

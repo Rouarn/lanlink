@@ -8,7 +8,15 @@
 //! 标准输出/错误的去向仍由调用方决定（core 仍重定向到日志文件）。
 
 use std::ffi::OsStr;
-use std::process::Command;
+use std::io;
+use std::process::{Command, Output, Stdio};
+use std::time::{Duration, Instant};
+
+/// `easytier-cli` 单次调用的上限。
+///
+/// Windows 上进程创建 + Defender 扫描可能卡到秒级；超过这个时间就杀掉子进程，
+/// 绝不能让状态轮询无限等待（否则界面会一直停在「连接中」）。
+pub const CLI_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// Windows：不为子进程创建控制台窗口。
 #[cfg(windows)]
@@ -32,5 +40,71 @@ pub fn command(program: impl AsRef<OsStr>) -> Command {
     #[cfg(not(windows))]
     {
         Command::new(program)
+    }
+}
+
+/// 带超时地执行命令并收集输出。
+///
+/// 超时（或子进程异常）时先 `kill` 再 `wait`，确保不会留下卡死的 `easytier-cli`；
+/// 调用方拿到 `Err` 后应保留上一次的快照，而不是把界面清空。
+pub fn run_with_timeout(mut cmd: Command, timeout: Duration) -> io::Result<Output> {
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = cmd.spawn()?;
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        format!("命令超过 {}ms 未返回，已结束", timeout.as_millis()),
+                    ));
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(err) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(err);
+            }
+        }
+    }
+    child.wait_with_output()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{command, run_with_timeout};
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn returns_output_of_a_fast_command() {
+        let mut cmd = command("echo");
+        cmd.arg("hello");
+        let output = run_with_timeout(cmd, Duration::from_secs(2)).expect("echo 应当成功");
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "hello");
+    }
+
+    /// 超时必须杀进程并返回错误，而不是一直等下去。
+    #[cfg(unix)]
+    #[test]
+    fn kills_the_child_when_timeout_is_hit() {
+        let mut cmd = command("sleep");
+        cmd.arg("10");
+        let started = Instant::now();
+        let result = run_with_timeout(cmd, Duration::from_millis(200));
+        let error = result.expect_err("超时应返回错误");
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "超时后必须立即返回，实际耗时 {:?}",
+            started.elapsed()
+        );
     }
 }

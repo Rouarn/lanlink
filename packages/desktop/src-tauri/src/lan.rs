@@ -54,8 +54,6 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use socket2::{Domain, Protocol, Socket, Type};
 
-use crate::proc;
-
 /// 原版局域网发现的组播地址（IPv4）。
 pub const MC_GROUP: Ipv4Addr = Ipv4Addr::new(224, 0, 2, 60);
 /// 原版局域网发现的端口。
@@ -263,21 +261,24 @@ fn bind_sender(ip: Ipv4Addr) -> io::Result<UdpSocket> {
     Ok(socket.into())
 }
 
-fn bind_sync_socket() -> io::Result<UdpSocket> {
+fn bind_sync_socket(port: u16) -> io::Result<UdpSocket> {
     let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
     socket.set_reuse_address(true)?;
-    socket.bind(&SocketAddr::from((Ipv4Addr::UNSPECIFIED, SYNC_PORT)).into())?;
+    socket.bind(&SocketAddr::from((Ipv4Addr::UNSPECIFIED, port)).into())?;
     let socket: UdpSocket = socket.into();
     socket.set_nonblocking(true)?;
     Ok(socket)
 }
 
-/// `easytier-cli peer` 里的 `ipv4` 可能带 `/24` 前缀，也可能为空或 `-`。
-fn parse_peer_ip(raw: &str) -> Option<Ipv4Addr> {
-    let head = raw.split('/').next()?.trim();
-    head.parse::<Ipv4Addr>()
-        .ok()
-        .filter(|ip| !ip.is_unspecified() && !ip.is_loopback())
+/// 从 `easytier-cli peer` 的 `ipv4` 字段里取出地址：
+/// 可能带 `/24` 前缀，也可能为空或 `-`。
+pub(crate) fn parse_ipv4(raw: &str) -> Option<Ipv4Addr> {
+    raw.split('/').next()?.trim().parse::<Ipv4Addr>().ok()
+}
+
+/// 对端虚拟 IP：剥掉 `/24` 前缀，并排除回环 / 未指定地址。
+pub(crate) fn parse_peer_ip(raw: &str) -> Option<Ipv4Addr> {
+    parse_ipv4(raw).filter(|ip| !ip.is_unspecified() && !ip.is_loopback())
 }
 
 /// 私有网段判断：`easytier-cli` 暂时拿不到对端列表时的兜底，
@@ -398,9 +399,6 @@ fn pipe(client: TcpStream, target: Ipv4Addr, target_port: u16) {
 
 /// 线程之间共享的状态。
 struct Shared {
-    /// easytier-cli 与 RPC 端口：心跳线程自己查对端，不依赖界面是否在轮询
-    cli: Option<PathBuf>,
-    portal: String,
     /// 房间名：远端 MOTD 为空时作为伪造公告的 MOTD
     name: String,
     log: PathBuf,
@@ -412,12 +410,14 @@ struct Shared {
     fake_ports: Mutex<HashSet<u16>>,
     /// 当前要播的伪造公告（供发送线程读取）
     announce: Mutex<Vec<Announcement>>,
-    /// 对端虚拟 IP（心跳线程每 5 秒刷新一次）
-    peers: Mutex<Vec<Ipv4Addr>>,
+    /// 对端虚拟 IP：由 `core` 统一轮询 `easytier-cli peer` 后写入，中继自己不再起子进程
+    peers: Arc<Mutex<Vec<Ipv4Addr>>>,
     /// 已经打过日志的失败点，避免每 1.5 秒刷屏
     logged: Mutex<HashSet<String>>,
     /// 致命错误（线程因此退出），由 `core` 读取后展示
     error: Mutex<Option<String>>,
+    /// 非致命降级原因（例如 UDP 4448 被占用导致无法同步对端世界端口）
+    degraded: Mutex<Option<String>>,
 }
 
 impl Shared {
@@ -470,14 +470,23 @@ pub struct LanRelay {
 }
 
 impl LanRelay {
-    /// 启动中继。`cli` 为内置 easytier-cli，`portal` 为 RPC 地址，`name` 为房间名。
+    /// 启动中继。`name` 为房间名，`peers` 是 `core` 维护的对端虚拟 IP 快照。
     ///
-    /// 所有 socket 先绑定成功再起线程，任何一步失败都整体返回 `Err`，不留半开状态。
+    /// 所有 socket 先绑定成功再起线程，关键能力失败就整体返回 `Err`，不留半开状态。
     pub fn start(
-        cli: Option<PathBuf>,
-        portal: String,
         name: String,
         log: PathBuf,
+        peers: Arc<Mutex<Vec<Ipv4Addr>>>,
+    ) -> Result<Self, String> {
+        Self::start_with_sync_port(name, log, peers, SYNC_PORT)
+    }
+
+    /// `sync_port` 仅用于测试（模拟 4448 被占用时的降级路径）。
+    fn start_with_sync_port(
+        name: String,
+        log: PathBuf,
+        peers: Arc<Mutex<Vec<Ipv4Addr>>>,
+        sync_port: u16,
     ) -> Result<Self, String> {
         let self_ips = local_ipv4s();
         if self_ips.is_empty() {
@@ -485,8 +494,6 @@ impl LanRelay {
         }
 
         let shared = Arc::new(Shared {
-            cli,
-            portal,
             name,
             log,
             stop: AtomicBool::new(false),
@@ -494,9 +501,10 @@ impl LanRelay {
             local: Mutex::new(WorldTracker::default()),
             fake_ports: Mutex::new(HashSet::new()),
             announce: Mutex::new(Vec::new()),
-            peers: Mutex::new(Vec::new()),
+            peers,
             logged: Mutex::new(HashSet::new()),
             error: Mutex::new(None),
+            degraded: Mutex::new(None),
         });
 
         // 1) 组播监听：每个网卡一个 socket
@@ -518,13 +526,18 @@ impl LanRelay {
             ));
         }
 
-        // 2) 房间内同步端口
-        let sync = match bind_sync_socket() {
-            Ok(socket) => socket,
+        // 2) 房间内同步端口：绑不上不整体失败，只降级为「本机发现」
+        let sync = match bind_sync_socket(sync_port) {
+            Ok(socket) => Some(socket),
             Err(err) => {
-                return Err(format!(
-                    "无法占用 UDP {SYNC_PORT}，房间内无法同步世界端口：{err}"
-                ))
+                let reason =
+                    format!("UDP {sync_port} 被占用，无法同步对端世界端口：{err}");
+                shared.log(
+                    "WARN",
+                    &format!("{reason}（局域网发现降级：只能看到本机世界，对端世界不会出现在列表里）"),
+                );
+                *shared.degraded.lock().unwrap() = Some(reason);
+                None
             }
         };
 
@@ -547,7 +560,7 @@ impl LanRelay {
             let shared = shared.clone();
             handles.push(thread::spawn(move || recv_loop(shared, ip, socket)));
         }
-        {
+        if let Some(sync) = sync {
             let shared = shared.clone();
             handles.push(thread::spawn(move || sync_loop(shared, sync)));
         }
@@ -559,7 +572,7 @@ impl LanRelay {
         shared.log(
             "INFO",
             &format!(
-                "局域网发现中继已启动（本机地址 {}，同步端口 {SYNC_PORT}）",
+                "局域网发现中继已启动（本机地址 {}，同步端口 {sync_port}）",
                 self_ips
                     .iter()
                     .map(ToString::to_string)
@@ -571,14 +584,26 @@ impl LanRelay {
         Ok(Self { shared, handles })
     }
 
-    /// 线程是否都还在跑（致命错误会让它们一起停下）。
+    /// 线程是否都还在跑：既看停止标志，也看 `JoinHandle`——
+    /// 线程 panic 后标志仍是「运行中」，只看标志会让界面一直显示正常。
     pub fn alive(&self) -> bool {
-        !self.shared.stopped()
+        !self.shared.stopped() && !any_finished(&self.handles)
     }
 
     /// 致命错误原因（正常运行时为 `None`）。
     pub fn error(&self) -> Option<String> {
-        self.shared.error.lock().unwrap().clone()
+        if let Some(error) = self.shared.error.lock().unwrap().clone() {
+            return Some(error);
+        }
+        if !self.shared.stopped() && any_finished(&self.handles) {
+            return Some("局域网发现线程意外退出（可能发生 panic），已停止".to_string());
+        }
+        None
+    }
+
+    /// 非致命降级原因（中继仍在跑，但少了一项能力）。
+    pub fn warning(&self) -> Option<String> {
+        self.shared.degraded.lock().unwrap().clone()
     }
 
     pub fn stop(&mut self) {
@@ -673,7 +698,6 @@ fn recv_loop(shared: Arc<Shared>, ip: Ipv4Addr, socket: UdpSocket) {
 fn sync_loop(shared: Arc<Shared>, socket: UdpSocket) {
     let mut remote: HashMap<(Ipv4Addr, u16), (String, Instant)> = HashMap::new();
     let mut forwards: HashMap<(Ipv4Addr, u16), Forward> = HashMap::new();
-    let mut last_peers: Option<Instant> = None;
     let mut last_send: Option<Instant> = None;
     let mut last_sweep = Instant::now();
     let mut buf = [0u8; MAX_PACKET];
@@ -711,15 +735,7 @@ fn sync_loop(shared: Arc<Shared>, socket: UdpSocket) {
             }
         }
 
-        // 2) 刷新对端列表（5 秒）并周期发送本机端口
-        if last_peers
-            .map(|at| at.elapsed() >= Duration::from_secs(5))
-            .unwrap_or(true)
-        {
-            let peers = probe_peers(&shared);
-            *shared.peers.lock().unwrap() = peers;
-            last_peers = Some(Instant::now());
-        }
+        // 2) 周期发送本机端口（对端列表由 core 统一维护，见 Shared::peers）
         if last_send
             .map(|at| at.elapsed() >= ANNOUNCE_INTERVAL)
             .unwrap_or(true)
@@ -847,44 +863,9 @@ fn send_sync(shared: &Shared, socket: &UdpSocket) {
     }
 }
 
-/// 从 `easytier-cli peer` 取对端虚拟 IP（供局域网发现与广播转发共用）。
-pub(crate) fn peers_from_cli(cli: Option<&std::path::Path>, portal: &str) -> Vec<Ipv4Addr> {
-    let Some(cli) = cli else {
-        return Vec::new();
-    };
-    let Ok(output) = proc::command(cli)
-        .arg("-p")
-        .arg(portal)
-        .arg("-o")
-        .arg("json")
-        .arg("peer")
-        .output()
-    else {
-        return Vec::new();
-    };
-    if !output.status.success() {
-        return Vec::new();
-    }
-    let Ok(value) = serde_json::from_slice::<serde_json::Value>(&output.stdout) else {
-        return Vec::new();
-    };
-    let mut peers = Vec::new();
-    for peer in value.as_array().into_iter().flatten() {
-        let Some(raw) = peer.get("ipv4").and_then(|v| v.as_str()) else {
-            continue;
-        };
-        if let Some(ip) = parse_peer_ip(raw) {
-            if !peers.contains(&ip) {
-                peers.push(ip);
-            }
-        }
-    }
-    peers
-}
-
-/// 从 `easytier-cli peer` 取对端虚拟 IP（每 5 秒一次）。
-fn probe_peers(shared: &Shared) -> Vec<Ipv4Addr> {
-    peers_from_cli(shared.cli.as_deref(), &shared.portal)
+/// 是否已有线程结束（正常运行时只可能是「被迫停止」或 panic）。
+fn any_finished(handles: &[JoinHandle<()>]) -> bool {
+    handles.iter().any(|handle| handle.is_finished())
 }
 
 /// 每 1.5 秒向本机组播地址播一次伪造公告，让原版「多人游戏」列表刷出条目。
@@ -1070,6 +1051,66 @@ mod tests {
         assert_eq!(parse_peer_ip("-"), None);
         assert_eq!(parse_peer_ip("127.0.0.1"), None);
         assert_eq!(parse_peer_ip("0.0.0.0"), None);
+    }
+
+    /// 节点信息里的 `ipv4_addr` 同样带 `/24`：剥掉后复制出来的地址才可直接使用。
+    #[test]
+    fn parse_ipv4_strips_cidr_prefix() {
+        assert_eq!(
+            parse_ipv4("10.126.126.1/24"),
+            Some(Ipv4Addr::new(10, 126, 126, 1))
+        );
+        assert_eq!(
+            parse_ipv4("10.126.126.1"),
+            Some(Ipv4Addr::new(10, 126, 126, 1))
+        );
+        assert_eq!(parse_ipv4(""), None);
+        assert_eq!(parse_ipv4("-"), None);
+    }
+
+    /// 线程异常退出（panic）必须能被识别，否则界面会一直显示「运行中」。
+    #[test]
+    fn finished_thread_is_detected() {
+        let running = thread::spawn(|| {
+            thread::sleep(Duration::from_millis(200));
+        });
+        assert!(!any_finished(std::slice::from_ref(&running)));
+
+        let done = thread::spawn(|| {});
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !done.is_finished() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert!(any_finished(std::slice::from_ref(&done)));
+    }
+
+    /// UDP 4448 被别的进程占用时，局域网发现应降级而不是整体启动失败。
+    ///
+    /// 依赖 BSD/macOS 的 `SO_REUSEADDR` 语义：先绑定的 socket 没开 reuse 时，后绑定会失败。
+    /// Windows 的 `SO_REUSEADDR` 允许重复绑定，因此这条用例只在 unix 上有意义。
+    #[cfg(unix)]
+    #[test]
+    fn sync_port_conflict_degrades_instead_of_failing() {
+        let occupied = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).expect("绑定临时端口失败");
+        let port = occupied.local_addr().unwrap().port();
+        let log = std::env::temp_dir().join(format!(
+            "lanlink-lan-degrade-{}-{:?}.log",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let peers = Arc::new(Mutex::new(Vec::new()));
+        let relay = match LanRelay::start_with_sync_port("测试房间".to_string(), log, peers, port) {
+            Ok(relay) => relay,
+            Err(err) => {
+                // 某些环境（CI 容器）不允许绑定组播：跳过，不影响其余断言
+                eprintln!("本机无法绑定组播，跳过降级断言：{err}");
+                return;
+            }
+        };
+        let warning = relay.warning();
+        assert!(warning.is_some(), "同步端口被占用时应给出降级原因");
+        assert!(relay.alive(), "降级后中继本身仍应在运行");
+        drop(relay);
     }
 
     #[test]

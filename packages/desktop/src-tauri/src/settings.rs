@@ -94,10 +94,29 @@ impl Settings {
 
     pub fn load() -> Settings {
         let mut settings: Settings = match path() {
-            Some(path) => fs::read_to_string(path)
-                .ok()
-                .and_then(|raw| serde_json::from_str(&raw).ok())
-                .unwrap_or_default(),
+            Some(path) => match fs::read_to_string(&path) {
+                Ok(raw) => match serde_json::from_str(&raw) {
+                    Ok(settings) => settings,
+                    Err(err) => {
+                        // 不能静默回默认值：用户的配置看起来「丢了」，日志里必须留痕
+                        crate::config::log_line(
+                            "WARN",
+                            "lanlink::settings",
+                            &format!("设置文件 {} 解析失败，本次使用默认值：{err}", path.display()),
+                        );
+                        Settings::default()
+                    }
+                },
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => Settings::default(),
+                Err(err) => {
+                    crate::config::log_line(
+                        "WARN",
+                        "lanlink::settings",
+                        &format!("无法读取设置文件 {}，本次使用默认值：{err}", path.display()),
+                    );
+                    Settings::default()
+                }
+            },
             None => Settings::default(),
         };
         let mut dirty = migrate(&mut settings);
@@ -128,15 +147,21 @@ impl Settings {
             return Err("无法定位设置文件".to_string());
         };
         if let Some(dir) = path.parent() {
-            fs::create_dir_all(dir).map_err(|err| format!("无法创建设置目录：{err}"))?;
+            crate::config::create_private_dir(dir)
+                .map_err(|err| format!("无法创建设置目录：{err}"))?;
         }
         let mut current = self.clone();
         // 落盘时始终标记为已迁移，避免下次启动又把用户填的中继当成历史残留清掉
         current.version = current.version.max(SETTINGS_VERSION);
         let json = serde_json::to_string_pretty(&current)
             .map_err(|err| format!("序列化设置失败：{err}"))?;
-        fs::write(&path, json).map_err(|err| format!("写入设置失败：{err}"))?;
+        // `.tmp` + rename：进程被强杀时不会留下半截 JSON，下次启动也就不会「设置丢了」
+        crate::config::write_atomic(&path, json.as_bytes())
+            .map_err(|err| format!("写入设置失败：{err}"))?;
         crate::config::hand_back(&path);
+        if let Some(dir) = path.parent() {
+            crate::config::hand_back(dir);
+        }
         Ok(())
     }
 }

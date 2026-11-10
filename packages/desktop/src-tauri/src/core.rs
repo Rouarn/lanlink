@@ -7,9 +7,10 @@
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom};
-use std::net::{SocketAddr, TcpStream};
+use std::net::{Ipv4Addr, SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Stdio};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
@@ -29,6 +30,11 @@ const START_TIMEOUT: Duration = Duration::from_secs(20);
 const PORT_RELEASE_TIMEOUT: Duration = Duration::from_secs(3);
 /// 局域网发现中继启动失败后的重试间隔
 const LAN_RETRY_INTERVAL: Duration = Duration::from_secs(30);
+/// 对端列表（`easytier-cli peer`）的最小刷新间隔。
+///
+/// 界面按 1–4 秒轮询状态，这里再做一次节流：稳态下每分钟最多 20 次进程创建，
+/// 局域网发现与广播转发都读这份快照，不再各自起子进程。
+const PEER_REFRESH: Duration = Duration::from_secs(3);
 /// 单次 easytier-cli 超过这个耗时就在日志里记一笔（Windows 真机上用来量化进程创建开销）
 const SLOW_CLI: Duration = Duration::from_millis(80);
 
@@ -106,6 +112,15 @@ struct Hint {
     text: String,
 }
 
+/// 一次 `easytier-cli peer` 查询的结果快照。
+///
+/// 查询失败（超时、core 还没就绪）时保留上一次快照，界面不会瞬间被清空。
+struct PeerSnapshot {
+    peers: Vec<PeerInfo>,
+    count: u32,
+    direct: u32,
+}
+
 pub struct Tunnel {
     core: Option<PathBuf>,
     cli: Option<PathBuf>,
@@ -129,6 +144,14 @@ pub struct Tunnel {
     node_cache: Option<(Option<String>, Option<String>, Option<String>)>,
     /// 上一次记录「CLI 太慢」日志的时间，避免每次轮询都写一行
     last_slow_cli: Option<Instant>,
+    /// 上一次 CLI 调用失败（超时 / 启动失败）的日志时间
+    last_cli_error: Option<Instant>,
+    /// 对端虚拟 IP 快照：局域网发现与广播转发共用，避免各自轮询 easytier-cli
+    peer_ips: Arc<Mutex<Vec<Ipv4Addr>>>,
+    /// 对端列表快照（界面用），查询失败时保留上一次
+    peer_cache: Option<PeerSnapshot>,
+    /// 上一次查询对端列表的时间（节流到 `PEER_REFRESH`）
+    peer_at: Option<Instant>,
     /// 通用 UDP 广播转发（CS 1.6 / 魔兽 / 帝国时代这类老游戏）
     bc: Option<broadcast::BroadcastRelay>,
     broadcast_ports: Vec<u16>,
@@ -137,8 +160,8 @@ pub struct Tunnel {
 
 impl Tunnel {
     pub fn new() -> Self {
-        let log_dir = log_dir();
-        let _ = fs::create_dir_all(&log_dir);
+        let log_dir = config::log_dir();
+        let _ = config::create_private_dir(&log_dir);
         let (core, cli) = resolve_binaries();
         match &core {
             Some(path) => eprintln!("[lanlink] easytier-core: {}", path.display()),
@@ -162,12 +185,16 @@ impl Tunnel {
             lan_retry_at: None,
             node_cache: None,
             last_slow_cli: None,
+            last_cli_error: None,
+            peer_ips: Arc::new(Mutex::new(Vec::new())),
+            peer_cache: None,
+            peer_at: None,
             bc: None,
             broadcast_ports: broadcast::normalize_ports(&Settings::load().broadcast_ports),
             bc_retry_at: None,
         };
-        // 上次以 root 运行留下的日志文件：这次启动就顺手把权限交还给登录用户
-        tunnel.relax_log_permissions();
+        // 上次以 root 运行留下的日志文件：这次启动就顺手把权限与属主打回登录用户
+        tunnel.secure_log_permissions();
         tunnel
     }
 
@@ -184,21 +211,26 @@ impl Tunnel {
     }
 
     /// core 以 root 运行时日志文件属于 root，普通用户清空不了。
-    /// 启动 core 时（以及每次启动 App 时）把权限与属主交还给当前登录用户。
-    fn relax_log_permissions(&self) {
+    /// 启动 core 时（以及每次启动 App 时）把权限收紧到 0600、属主交还给当前登录用户。
+    ///
+    /// 日志里有中继地址、虚拟 IP 与本机路网信息：不能像旧版本那样给 0666，
+    /// 也不能放在所有用户可读的 `/tmp`。
+    fn secure_log_permissions(&self) {
         let path = self.log_path();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             if let Ok(meta) = fs::metadata(&path) {
                 let mut permissions = meta.permissions();
-                if permissions.mode() & 0o666 != 0o666 {
-                    permissions.set_mode(0o666);
+                if permissions.mode() & 0o777 != 0o600 {
+                    permissions.set_mode(0o600);
                     let _ = fs::set_permissions(&path, permissions);
                 }
             }
         }
         config::hand_back(&path);
+        // 目录本身也要交还：root 建的 0700 目录会让普通用户之后读不到日志
+        config::hand_back(&self.log_dir);
     }
 
     fn pid_path(&self) -> PathBuf {
@@ -228,6 +260,9 @@ impl Tunnel {
         self.lan_error = None;
         self.lan_retry_at = None;
         self.node_cache = None;
+        self.peer_cache = None;
+        self.peer_at = None;
+        self.peer_ips.lock().unwrap().clear();
 
         if port_in_use() || !port_holders().is_empty() {
             self.state = State::Reconnecting;
@@ -258,6 +293,10 @@ impl Tunnel {
         self.lan = None;
         self.bc = None;
         self.node_cache = None;
+        // 对端快照属于上一次会话，不能带到下一次连接
+        self.peer_cache = None;
+        self.peer_at = None;
+        self.peer_ips.lock().unwrap().clear();
         if let Some(mut child) = self.child.take() {
             let _ = child.kill();
             let _ = child.wait();
@@ -273,6 +312,10 @@ impl Tunnel {
         self.error = None;
         self.hint = None;
         self.retried = false;
+        // 上一次会话的中继失败原因不能留到下次连接
+        self.lan_error = None;
+        self.lan_retry_at = None;
+        self.bc_retry_at = None;
         // 断开即清空本次房间：界面不该再拿到上一轮的房间码/角色/注册结果，
         // 也就不会把「没有数据」当成「注册失败」继续提示。
         self.room = None;
@@ -336,7 +379,7 @@ impl Tunnel {
             }
         }
 
-        // 2. 读取节点与对端信息
+        // 2. 读取节点与对端信息（查询失败时保留上一次快照，界面不会瞬间清空）
         if status.running {
             // 连上之后 ipv4/hostname/version 在子进程存活期间不会变：
             // 命中缓存就不再起 easytier-cli，稳态下每次轮询只剩 peer 一次进程创建。
@@ -353,7 +396,7 @@ impl Tunnel {
                         .get("ipv4_addr")
                         .and_then(|v| v.as_str())
                         .filter(|v| !v.is_empty())
-                        .map(str::to_owned);
+                        .map(normalize_ipv4);
                     status.hostname = node
                         .get("hostname")
                         .and_then(|v| v.as_str())
@@ -370,39 +413,11 @@ impl Tunnel {
                 }
             }
 
-            if let Some(peers) = self.run_cli_json("peer").and_then(|v| v.as_array().cloned()) {
-                let mut peer_count = 0u32;
-                let mut direct_count = 0u32;
-                for peer in &peers {
-                    let cost = peer.get("cost").and_then(|v| v.as_str()).unwrap_or_default();
-                    if cost.eq_ignore_ascii_case("local") {
-                        continue;
-                    }
-                    peer_count += 1;
-                    let proto = peer
-                        .get("tunnel_proto")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("-");
-                    if !proto.is_empty() && proto != "-" {
-                        direct_count += 1;
-                    }
-                    status.peers.push(PeerInfo {
-                        hostname: peer
-                            .get("hostname")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("未知节点")
-                            .to_string(),
-                        ipv4: peer
-                            .get("ipv4")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("-")
-                            .to_string(),
-                        cost: cost.to_string(),
-                        proto: proto.to_string(),
-                    });
-                }
-                status.peer_count = peer_count;
-                status.direct_peer_count = direct_count;
+            self.refresh_peers();
+            if let Some(snapshot) = &self.peer_cache {
+                status.peers = snapshot.peers.clone();
+                status.peer_count = snapshot.count;
+                status.direct_peer_count = snapshot.direct;
             }
         }
 
@@ -440,7 +455,11 @@ impl Tunnel {
         self.sync_lan();
         status.lan_enabled = self.lan_enabled;
         status.lan_relay = self.lan.is_some();
-        status.lan_error = self.lan_error.clone();
+        // 先报致命错误；没有致命错误时把「降级原因」（例如 4448 被占用）带给界面
+        status.lan_error = self
+            .lan_error
+            .clone()
+            .or_else(|| self.lan.as_ref().and_then(|relay| relay.warning()));
 
         status.state = self.state;
         status.error = self.error.clone();
@@ -450,6 +469,68 @@ impl Tunnel {
         status.role = self.room.as_ref().map(|room| room.role.clone());
         status.network = self.room.as_ref().map(|room| room.network.clone());
         status
+    }
+
+    /// 按 `PEER_REFRESH` 节流地刷新对端列表。
+    ///
+    /// 局域网发现与广播转发都读这份快照，稳态下整个进程每分钟只起 20 次
+    /// `easytier-cli`（旧版本 status + 两个中继各 5 秒一次，约 44–54 次）。
+    /// 查询失败时保留上一次快照，避免界面上的 peer 列表瞬间清空。
+    fn refresh_peers(&mut self) {
+        if let Some(at) = self.peer_at {
+            if at.elapsed() < PEER_REFRESH {
+                return;
+            }
+        }
+        self.peer_at = Some(Instant::now());
+        let Some(value) = self.run_cli_json("peer") else {
+            return;
+        };
+        let Some(peers) = value.as_array() else {
+            return;
+        };
+
+        let mut info = Vec::new();
+        let mut ips: Vec<Ipv4Addr> = Vec::new();
+        let mut count = 0u32;
+        let mut direct = 0u32;
+        for peer in peers {
+            let cost = peer.get("cost").and_then(|v| v.as_str()).unwrap_or_default();
+            if cost.eq_ignore_ascii_case("local") {
+                continue;
+            }
+            count += 1;
+            let proto = peer
+                .get("tunnel_proto")
+                .and_then(|v| v.as_str())
+                .unwrap_or("-");
+            if !proto.is_empty() && proto != "-" {
+                direct += 1;
+            }
+            let raw_ip = peer.get("ipv4").and_then(|v| v.as_str()).unwrap_or("-");
+            if let Some(ip) = lan::parse_peer_ip(raw_ip) {
+                if !ips.contains(&ip) {
+                    ips.push(ip);
+                }
+            }
+            info.push(PeerInfo {
+                hostname: peer
+                    .get("hostname")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("未知节点")
+                    .to_string(),
+                ipv4: normalize_ipv4(raw_ip),
+                cost: cost.to_string(),
+                proto: proto.to_string(),
+            });
+        }
+
+        *self.peer_ips.lock().unwrap() = ips;
+        self.peer_cache = Some(PeerSnapshot {
+            peers: info,
+            count,
+            direct,
+        });
     }
 
     /// 开关「局域网发现」：立刻生效（关掉时马上停播并释放端口）。
@@ -495,10 +576,9 @@ impl Tunnel {
                 if !cooling {
                     if let Some(name) = self.room.as_ref().map(|room| room.name.clone()) {
                         match lan::LanRelay::start(
-                            self.cli.clone(),
-                            config::RPC_PORTAL.to_string(),
                             name,
                             self.log_path(),
+                            self.peer_ips.clone(),
                         ) {
                             Ok(relay) => {
                                 self.lan = Some(relay);
@@ -533,10 +613,9 @@ impl Tunnel {
                 .unwrap_or(false);
             if !cooling {
                 match broadcast::BroadcastRelay::start(
-                    self.cli.clone(),
-                    config::RPC_PORTAL.to_string(),
                     &self.broadcast_ports,
                     self.log_path(),
+                    self.peer_ips.clone(),
                 ) {
                     Ok(relay) => {
                         self.bc = Some(relay);
@@ -591,7 +670,7 @@ impl Tunnel {
     ///
     /// 早先版本里 core 以管理员身份创建日志，文件属于 root、权限 644，
     /// 普通窗口 `truncate` 会被拒（EACCES）——这正是「点清空没反应」的原因。
-    /// 现在提权启动时会把日志权限/属主交还给登录用户（见 `relax_log_permissions`），
+    /// 现在提权启动时会把日志权限/属主交还给登录用户（见 `secure_log_permissions`），
     /// 但历史遗留的 root 文件仍要能清：日志目录归登录用户所有，删掉旧文件再建一个空的即可。
     pub fn clear_logs(&self) -> Result<(), String> {
         let path = self.log_path();
@@ -630,18 +709,23 @@ impl Tunnel {
             return Err("尚未选择房间".to_string());
         };
 
-        let _ = fs::create_dir_all(&self.log_dir);
+        let _ = config::create_private_dir(&self.log_dir);
         let log_path = self.log_path();
-        let log = OpenOptions::new()
-            .create(true)
-            .append(true)
+        let mut log_options = OpenOptions::new();
+        log_options.create(true).append(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            log_options.mode(0o600);
+        }
+        let log = log_options
             .open(&log_path)
             .map_err(|err| format!("无法打开日志文件 {}：{err}", log_path.display()))?;
         let log_err = log
             .try_clone()
             .map_err(|err| format!("无法复制日志句柄：{err}"))?;
-        // 以管理员身份运行时新建的日志属于 root，交还给登录用户，避免之后清空被拒
-        self.relax_log_permissions();
+        // 以管理员身份运行时新建的日志属于 root：收紧到 0600 并交还给登录用户
+        self.secure_log_permissions();
 
         let mut cmd = proc::command(&core);
         cmd.arg("--network-name")
@@ -674,11 +758,10 @@ impl Tunnel {
     /// 其它占用者只报告、不擅自杀掉。返回清理后仍然占用端口的进程列表。
     fn reclaim_ports(&self, core: &Path) -> Vec<PortHolder> {
         let me = std::process::id();
-        let core_path = core.display().to_string();
         let mut victims: Vec<u32> = Vec::new();
 
         for holder in port_holders() {
-            if holder.pid != me && holder.command.contains(&core_path) {
+            if holder.pid != me && is_our_core(&holder.command, core) {
                 victims.push(holder.pid);
             }
         }
@@ -711,16 +794,33 @@ impl Tunnel {
     }
 
     fn run_cli_json(&mut self, subcommand: &str) -> Option<serde_json::Value> {
-        let cli = self.cli.as_ref()?;
+        let cli = self.cli.clone()?;
         let started = Instant::now();
-        let output = proc::command(cli)
-            .arg("-p")
+        let mut cmd = proc::command(&cli);
+        cmd.arg("-p")
             .arg(config::RPC_PORTAL)
             .arg("-o")
             .arg("json")
-            .arg(subcommand)
-            .output()
-            .ok()?;
+            .arg(subcommand);
+        // 一定要有超时：Windows 上 CLI 偶尔会被 Defender 卡住，无限等待会把轮询拖死
+        let output = match proc::run_with_timeout(cmd, proc::CLI_TIMEOUT) {
+            Ok(output) => output,
+            Err(err) => {
+                // 失败沿用上一次快照；日志最多 30 秒一条，避免超时时刷屏
+                if self
+                    .last_cli_error
+                    .map(|at| at.elapsed() >= Duration::from_secs(30))
+                    .unwrap_or(true)
+                {
+                    self.last_cli_error = Some(Instant::now());
+                    self.note(
+                        "WARN",
+                        &format!("easytier-cli {subcommand} 调用失败：{err}（沿用上一次状态）"),
+                    );
+                }
+                return None;
+            }
+        };
         // 量化进程创建开销：真机上超过阈值就写进日志（最多 10 秒一条，避免刷屏）
         let elapsed = started.elapsed();
         if elapsed >= SLOW_CLI
@@ -819,6 +919,7 @@ fn listen_ports() -> Vec<u16> {
     ports
 }
 
+#[cfg(unix)]
 fn port_holders() -> Vec<PortHolder> {
     let mut holders: Vec<PortHolder> = Vec::new();
     let mut cmd = proc::command("lsof");
@@ -863,6 +964,151 @@ fn port_holders() -> Vec<PortHolder> {
     holders
 }
 
+/// Windows：用 `netstat -ano` 找占用 PID（系统自带，不依赖 lsof/pgrep）。
+///
+/// 进程全路径用 `QueryFullProcessImageNameW` 取，取不到时退回 `tasklist` 的映像名；
+/// 这样「端口被占 → 只杀自己的 core」的重试逻辑在 Windows 上同样成立。
+#[cfg(windows)]
+fn port_holders() -> Vec<PortHolder> {
+    let mut cmd = proc::command("netstat");
+    cmd.arg("-ano");
+    let Ok(output) = proc::run_with_timeout(cmd, proc::CLI_TIMEOUT) else {
+        return Vec::new();
+    };
+    let mut holders = parse_netstat(&String::from_utf8_lossy(&output.stdout), &listen_ports());
+    if holders.is_empty() {
+        return holders;
+    }
+    let names = tasklist();
+    for holder in &mut holders {
+        holder.command = process_image(holder.pid)
+            .or_else(|| names.get(&holder.pid).cloned())
+            .unwrap_or_default();
+    }
+    holders
+}
+
+/// 解析 `netstat -ano` 的输出，只保留「本地端口在监听 / 已绑定」的行。
+///
+/// 格式：
+/// ```text
+///   TCP    0.0.0.0:15888     0.0.0.0:0      LISTENING      1234
+///   UDP    0.0.0.0:4448      *:*                            5678
+/// ```
+/// 不依赖 LISTENING 这个英文状态词（避免本地化系统差异），改为看外部地址是否为通配。
+#[cfg_attr(not(windows), allow(dead_code))]
+fn parse_netstat(text: &str, ports: &[u16]) -> Vec<PortHolder> {
+    let mut holders: Vec<PortHolder> = Vec::new();
+    for line in text.lines() {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        if fields.len() < 4 {
+            continue;
+        }
+        let proto = fields[0].to_ascii_uppercase();
+        let is_tcp = proto == "TCP";
+        if !is_tcp && proto != "UDP" {
+            continue;
+        }
+        let foreign = fields.get(2).copied().unwrap_or_default();
+        let wildcard = matches!(foreign, "0.0.0.0:0" | "[::]:0" | "*:*");
+        if is_tcp && !wildcard {
+            continue;
+        }
+        if !is_tcp && fields.len() < 4 {
+            continue;
+        }
+        let Some(port) = fields[1]
+            .rsplit(':')
+            .next()
+            .and_then(|value| value.parse::<u16>().ok())
+        else {
+            continue;
+        };
+        if !ports.contains(&port) {
+            continue;
+        }
+        let Some(pid) = fields
+            .last()
+            .and_then(|value| value.trim().parse::<u32>().ok())
+        else {
+            continue;
+        };
+        if pid == 0 || holders.iter().any(|h| h.pid == pid && h.port == port) {
+            continue;
+        }
+        holders.push(PortHolder {
+            pid,
+            port,
+            command: String::new(),
+        });
+    }
+    holders
+}
+
+/// `tasklist` 的「PID → 映像名」映射（只在取进程全路径失败时用）。
+#[cfg(windows)]
+fn tasklist() -> std::collections::HashMap<u32, String> {
+    let mut names = std::collections::HashMap::new();
+    let mut cmd = proc::command("tasklist");
+    cmd.args(["/FO", "CSV", "/NH"]);
+    let Ok(output) = proc::run_with_timeout(cmd, proc::CLI_TIMEOUT) else {
+        return names;
+    };
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        let parts: Vec<&str> = line.trim().trim_end_matches('"').split("\",\"").collect();
+        if parts.len() < 2 {
+            continue;
+        }
+        let name = parts[0].trim_start_matches('"').to_string();
+        if let Ok(pid) = parts[parts.len() - 1].trim_matches('"').parse::<u32>() {
+            names.insert(pid, name);
+        }
+    }
+    names
+}
+
+/// 进程可执行文件的完整路径（Windows）。
+#[cfg(windows)]
+fn process_image(pid: u32) -> Option<String> {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+
+    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if handle.is_null() {
+        return None;
+    }
+    let mut buffer = [0u16; 1024];
+    let mut size = buffer.len() as u32;
+    let ok = unsafe { QueryFullProcessImageNameW(handle, 0, buffer.as_mut_ptr(), &mut size) };
+    unsafe { CloseHandle(handle) };
+    if ok == 0 {
+        return None;
+    }
+    Some(String::from_utf16_lossy(&buffer[..size as usize]))
+}
+
+/// 占用者是不是本应用启动的 core（按可执行文件路径判断，避免误杀用户自己装的 EasyTier）。
+fn is_our_core(command: &str, core: &Path) -> bool {
+    if command.is_empty() {
+        return false;
+    }
+    let core = core.to_string_lossy();
+    if core.is_empty() {
+        return false;
+    }
+    #[cfg(windows)]
+    {
+        command.to_ascii_lowercase().contains(&core.to_ascii_lowercase())
+    }
+    #[cfg(not(windows))]
+    {
+        command.contains(core.as_ref())
+    }
+}
+
+#[cfg(unix)]
 fn full_command(pid: u32, fallback: &str) -> String {
     proc::command("ps")
         .args(["-o", "command=", "-p", &pid.to_string()])
@@ -873,6 +1119,7 @@ fn full_command(pid: u32, fallback: &str) -> String {
         .unwrap_or_else(|| fallback.to_string())
 }
 
+#[cfg(unix)]
 fn pgrep_pids(core: &Path) -> Vec<u32> {
     let Ok(output) = proc::command("pgrep").arg("-f").arg(core).output() else {
         return Vec::new();
@@ -883,18 +1130,40 @@ fn pgrep_pids(core: &Path) -> Vec<u32> {
         .collect()
 }
 
+#[cfg(not(unix))]
+fn pgrep_pids(_core: &Path) -> Vec<u32> {
+    Vec::new()
+}
+
 fn signal(pid: u32, sig: i32) {
     #[cfg(unix)]
     unsafe {
         libc::kill(pid as i32, sig);
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        // Windows 没有 Unix 信号：taskkill 不带 /F 只会给 GUI 窗口发 WM_CLOSE，
+        // 控制台程序（easytier-core）收不到，所以这里直接强制结束；
+        // 只对「确认是本应用 core」的 pid 调用，见 reclaim_ports。
+        let _ = sig;
+        let mut cmd = proc::command("taskkill");
+        cmd.arg("/PID").arg(pid.to_string()).arg("/F");
+        let _ = proc::run_with_timeout(cmd, proc::CLI_TIMEOUT);
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = (pid, sig);
     }
 }
 
 fn wait_ports_free(timeout: Duration) -> bool {
+    // Windows 上一次 port_holders() 要起 netstat + tasklist 两个进程，
+    // 轮询间隔放大到 400ms，避免「回收端口」这一下自己又变成进程风暴。
+    #[cfg(windows)]
+    const STEP: Duration = Duration::from_millis(400);
+    #[cfg(not(windows))]
+    const STEP: Duration = Duration::from_millis(120);
+
     let deadline = Instant::now() + timeout;
     loop {
         if port_holders().is_empty() {
@@ -903,7 +1172,7 @@ fn wait_ports_free(timeout: Duration) -> bool {
         if Instant::now() >= deadline {
             return false;
         }
-        std::thread::sleep(Duration::from_millis(120));
+        std::thread::sleep(STEP);
     }
 }
 
@@ -1050,15 +1319,12 @@ fn platform_dir() -> &'static str {
     }
 }
 
-fn log_dir() -> PathBuf {
-    #[cfg(unix)]
-    {
-        PathBuf::from("/tmp/lanlink")
-    }
-    #[cfg(windows)]
-    {
-        std::env::temp_dir().join("lanlink")
-    }
+/// `easytier-cli` 的 `ipv4_addr` / `ipv4` 形如 `10.126.126.1/24`：
+/// 去掉前缀后缀，复制出来就是可以直接粘贴使用的地址。
+fn normalize_ipv4(raw: &str) -> String {
+    lan::parse_ipv4(raw)
+        .map(|ip| ip.to_string())
+        .unwrap_or_else(|| raw.to_string())
 }
 
 /// 把文件截断为 0 字节（不存在则创建）。
@@ -1259,6 +1525,39 @@ mod tests {
         assert_eq!(fs::metadata(&log).unwrap().len(), 0, "日志文件应被清空");
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// 节点信息里的地址带 `/24`，界面复制出来的必须是可直接使用的纯地址。
+    #[test]
+    fn normalizes_node_ipv4() {
+        assert_eq!(normalize_ipv4("10.126.126.1/24"), "10.126.126.1");
+        assert_eq!(normalize_ipv4("10.126.126.1"), "10.126.126.1");
+        // 解析不了就原样保留，至少不要显示别的东西
+        assert_eq!(normalize_ipv4("-"), "-");
+    }
+
+    /// Windows 的端口占用解析：只认监听/绑定行，且按端口过滤、按 PID 去重。
+    #[test]
+    fn parses_windows_netstat_output() {
+        let sample = "\
+活动连接
+
+  协议  本地地址          外部地址        状态           PID
+  TCP    0.0.0.0:15888         0.0.0.0:0              LISTENING       4321
+  TCP    [::]:15888            [::]:0                 LISTENING       4321
+  TCP    192.168.1.5:53211      10.0.0.9:443           ESTABLISHED     9999
+  TCP    127.0.0.1:11010        127.0.0.1:60000        ESTABLISHED     7777
+  UDP    0.0.0.0:27015          *:*                                    5555
+  UDP    [::]:11010             *:*                                    5555
+  TCP    0.0.0.0:445            0.0.0.0:0              LISTENING       4
+";
+        let holders = parse_netstat(sample, &[15888, 11010, 27015]);
+        let got: Vec<(u32, u16)> = holders.iter().map(|h| (h.pid, h.port)).collect();
+        assert_eq!(got, vec![(4321, 15888), (5555, 27015), (5555, 11010)]);
+        // 外部地址不是通配的 TCP 行（已建立的连接）不能被当成占用者
+        assert!(!got.iter().any(|(pid, _)| *pid == 9999 || *pid == 7777));
+        // 不在关注列表里的端口忽略
+        assert!(!got.iter().any(|(_, port)| *port == 445));
     }
 
     /// 断开后 status 不能再带本次房间信息：界面据此收起「当前房间」卡片，

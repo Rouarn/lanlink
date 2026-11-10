@@ -497,10 +497,30 @@ fn cached() -> Vec<Room> {
     let Some(path) = cache_path() else {
         return Vec::new();
     };
-    let Ok(raw) = fs::read_to_string(path) else {
-        return Vec::new();
+    let raw = match fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+        Err(err) => {
+            crate::config::log_line(
+                "WARN",
+                "lanlink::rooms",
+                &format!("无法读取房间缓存 {}：{err}", path.display()),
+            );
+            return Vec::new();
+        }
     };
-    serde_json::from_str(&raw).unwrap_or_default()
+    match serde_json::from_str(&raw) {
+        Ok(rooms) => rooms,
+        Err(err) => {
+            // 缓存损坏时回空列表不致命，但必须留下痕迹，否则用户只会看到「历史房间没了」
+            crate::config::log_line(
+                "WARN",
+                "lanlink::rooms",
+                &format!("房间缓存 {} 解析失败，已忽略：{err}", path.display()),
+            );
+            Vec::new()
+        }
+    }
 }
 
 fn write_cache(rooms: &[Room]) {
@@ -513,11 +533,16 @@ fn persist(rooms: &[Room]) -> Result<(), String> {
         return Err("无法定位房间缓存文件".to_string());
     };
     if let Some(dir) = path.parent() {
-        fs::create_dir_all(dir).map_err(|err| format!("无法创建缓存目录：{err}"))?;
+        crate::config::create_private_dir(dir).map_err(|err| format!("无法创建缓存目录：{err}"))?;
     }
     let json = serde_json::to_string_pretty(rooms).map_err(|err| format!("序列化房间失败：{err}"))?;
-    fs::write(&path, json).map_err(|err| format!("写入房间缓存失败：{err}"))?;
+    // `.tmp` + rename：房间缓存里含密钥，既不能写一半，也不能被别的用户读到
+    crate::config::write_atomic(&path, json.as_bytes())
+        .map_err(|err| format!("写入房间缓存失败：{err}"))?;
     crate::config::hand_back(&path);
+    if let Some(dir) = path.parent() {
+        crate::config::hand_back(dir);
+    }
     Ok(())
 }
 

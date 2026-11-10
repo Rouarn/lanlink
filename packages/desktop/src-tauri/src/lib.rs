@@ -12,7 +12,7 @@ mod single;
 mod win_task;
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde::Serialize;
@@ -23,7 +23,9 @@ use crate::rooms::Room;
 use crate::settings::Settings;
 
 struct AppState {
-    tunnel: Mutex<Tunnel>,
+    /// 用 `Arc` 包一层，命令层才能把锁与阻塞操作整体搬进 `spawn_blocking`，
+    /// 保持命令签名不变的同时不冻住主线程。
+    tunnel: Arc<Mutex<Tunnel>>,
 }
 
 /// 提权过程中（等待管理员实例接管）避免重复拉起。
@@ -56,10 +58,13 @@ fn app_info(state: State<'_, AppState>) -> AppInfo {
 }
 
 /// 状态查询要读日志、跑 easytier-cli，可能被启动流程短暂阻塞，
-/// 因此用 async 命令放到工作线程，避免冻住主线程（窗口会白屏）。
+/// 因此整个查询放到阻塞线程池，不占用异步运行时线程（窗口不会白屏）。
 #[tauri::command]
 async fn get_status(state: State<'_, AppState>) -> Result<Status, String> {
-    let mut status = state.tunnel.lock().unwrap().status();
+    let tunnel = state.tunnel.clone();
+    let mut status = tauri::async_runtime::spawn_blocking(move || tunnel.lock().unwrap().status())
+        .await
+        .map_err(|err| format!("状态查询失败：{err}"))?;
     if let Some(err) = ELEVATE_ERROR.lock().unwrap().take() {
         status.elevate_error = Some(err);
     }
@@ -217,22 +222,31 @@ fn install_silent_task() -> Result<(), String> {
     Ok(())
 }
 
+/// 创建房间要访问远端解析服务，放到阻塞线程池，避免阻塞 UI 线程。
 #[tauri::command]
-fn create_room(name: String) -> Result<Room, String> {
-    let settings = Settings::load();
-    rooms::create(
-        &name,
-        settings.relays,
-        settings.resolver_base_url,
-        resolver_token(),
-    )
+async fn create_room(name: String) -> Result<Room, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let settings = Settings::load();
+        rooms::create(
+            &name,
+            settings.relays,
+            settings.resolver_base_url,
+            resolver_token(),
+        )
+    })
+    .await
+    .map_err(|err| format!("创建房间失败：{err}"))?
 }
 
 /// 解析房间码（短码 / 完整码），用于加入前的预览。
 #[tauri::command]
-fn resolve_code(code: String) -> Result<Room, String> {
-    let settings = Settings::load();
-    rooms::resolve_code(&code, settings.resolver_base_url, resolver_token())
+async fn resolve_code(code: String) -> Result<Room, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let settings = Settings::load();
+        rooms::resolve_code(&code, settings.resolver_base_url, resolver_token())
+    })
+    .await
+    .map_err(|err| format!("解析房间码失败：{err}"))?
 }
 
 /// 导出完整房间码（自包含，可发给别人）。
@@ -270,26 +284,32 @@ fn clear_rooms() -> Result<(), String> {
 /// 中继来自房间记录：加入方不需要先在本地配置中继，全新安装也能直接连；
 /// 只有创建房间（`create_room`）才要求本地已配中继。
 #[tauri::command]
-fn connect(state: State<'_, AppState>, code: String) -> Result<Status, String> {
-    let settings = Settings::load();
-    let room = rooms::lookup(
-        &code,
-        settings.relays.clone(),
-        settings.resolver_base_url.clone(),
-        resolver_token(),
-    )?;
-    request_connect(&state, room, None)
+async fn connect(state: State<'_, AppState>, code: String) -> Result<Status, String> {
+    let tunnel = state.tunnel.clone();
+    // 解析房间码要发网络请求、启动 core 要等端口回收：整体放到阻塞线程池
+    tauri::async_runtime::spawn_blocking(move || {
+        let settings = Settings::load();
+        let room = rooms::lookup(
+            &code,
+            settings.relays.clone(),
+            settings.resolver_base_url.clone(),
+            resolver_token(),
+        )?;
+        request_connect(&tunnel, room, None)
+    })
+    .await
+    .map_err(|err| format!("连接失败：{err}"))?
 }
 
 fn request_connect(
-    state: &AppState,
+    tunnel: &Arc<Mutex<Tunnel>>,
     room: Room,
     hostname: Option<String>,
 ) -> Result<Status, String> {
     if !elevate::is_elevated() {
         if ELEVATING.swap(true, Ordering::SeqCst) {
             // 上一次授权还没结束，别重复拉起实例
-            let mut status = state.tunnel.lock().unwrap().status();
+            let mut status = tunnel.lock().unwrap().status();
             status.elevating = true;
             return Ok(status);
         }
@@ -351,30 +371,45 @@ fn request_connect(
             }
         });
 
-        let mut status = state.tunnel.lock().unwrap().status();
+        let mut status = tunnel.lock().unwrap().status();
         status.elevating = true;
         return Ok(status);
     }
 
-    Ok(state.tunnel.lock().unwrap().start(room, hostname))
+    Ok(tunnel.lock().unwrap().start(room, hostname))
 }
 
+/// 断开要等 core 退出、回收端口，可能要几秒：放到阻塞线程池，界面保持可响应。
+///
+/// 用 `AppHandle`（拥有所有权）而不是借用参数：异步命令里借用参数要求返回 `Result`，
+/// 这里保持前端拿到的返回值不变。
 #[tauri::command]
-fn disconnect(state: State<'_, AppState>) -> Status {
-    state.tunnel.lock().unwrap().stop()
+async fn disconnect(app: tauri::AppHandle) -> Status {
+    let tunnel = app.state::<AppState>().tunnel.clone();
+    tauri::async_runtime::spawn_blocking(move || tunnel.lock().unwrap().stop())
+        .await
+        .unwrap_or_else(|err| {
+            eprintln!("断开失败（工作线程异常）：{err}");
+            Status::default()
+        })
 }
 
+/// 读日志是磁盘 IO，放到阻塞线程池。
 #[tauri::command]
-fn read_logs(
-    state: State<'_, AppState>,
+async fn read_logs(
+    app: tauri::AppHandle,
     level: Option<String>,
     limit: Option<usize>,
 ) -> Vec<LogLine> {
-    state
-        .tunnel
-        .lock()
-        .unwrap()
-        .read_logs(level.as_deref().unwrap_or("all"), limit.unwrap_or(400))
+    let tunnel = app.state::<AppState>().tunnel.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        tunnel
+            .lock()
+            .unwrap()
+            .read_logs(level.as_deref().unwrap_or("all"), limit.unwrap_or(400))
+    })
+    .await
+    .unwrap_or_default()
 }
 
 #[tauri::command]
@@ -587,7 +622,7 @@ pub fn run() {
 
     let app = tauri::Builder::default()
         .manage(AppState {
-            tunnel: Mutex::new(Tunnel::new()),
+            tunnel: Arc::new(Mutex::new(Tunnel::new())),
         })
         .invoke_handler(tauri::generate_handler![
             app_info,
@@ -644,8 +679,8 @@ pub fn run() {
                     resolver_token(),
                 ) {
                     Ok(room) => {
-                        let state = handle.state::<AppState>();
-                        if let Err(err) = request_connect(&state, room, hostname) {
+                        let tunnel = handle.state::<AppState>().tunnel.clone();
+                        if let Err(err) = request_connect(&tunnel, room, hostname) {
                             eprintln!("连接失败：{err}");
                         }
                     }
