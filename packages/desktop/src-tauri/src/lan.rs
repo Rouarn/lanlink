@@ -68,6 +68,17 @@ pub const MC_PORT: u16 = 4445;
 const ANNOUNCE_INTERVAL: Duration = Duration::from_millis(1500);
 /// 超过这个时间没再收到某个世界（或某个成员的心跳），视为它的世界已关闭。
 const WORLD_TTL: Duration = Duration::from_secs(5);
+/// 对端世界从宣告里消失后，宽限这么久再撤转发。
+///
+/// 宣告是 UDP 单播，网卡切换、防火墙、对端自己的发现抖动都会让列表短暂变空；
+/// 立刻撤不仅会让条目闪烁，重建时还会换一个本地端口，旧条目在客户端里变成
+/// 连不上的死地址。15 秒足够覆盖常见抖动，又不至于让真正关掉的世界挂太久。
+const FORWARD_GRACE: Duration = Duration::from_secs(15);
+/// 对端明确在线、只是快照里暂时没有这个端口时的宽限。
+///
+/// 这一档多半是「对端真关了 / 换了端口」，宽限只为吸收对端自己发现的抖动，
+/// 所以给得短：条目不消失，但也不会把死地址挂太久。
+const FORWARD_GRACE_SHORT: Duration = Duration::from_secs(5);
 /// 单个 socket 的读超时 / 主循环步长，决定停止时的响应速度。
 const TICK: Duration = Duration::from_millis(200);
 /// 单个公告报文的最大长度（原版只有几十字节，留足余量）。
@@ -286,25 +297,39 @@ pub(crate) fn is_private(ip: Ipv4Addr) -> bool {
 struct Forward {
     port: u16,
     motd: String,
+    /// 这个世界从对端宣告里消失的时间：宽限期内保留端口，回来就继续用同一个端口。
+    missing_since: Option<Instant>,
     stop: Arc<AtomicBool>,
     handle: Option<JoinHandle<()>>,
 }
 
 impl Forward {
-    fn start(target: Ipv4Addr, target_port: u16, motd: String) -> io::Result<Self> {
+    fn start(
+        target: Ipv4Addr,
+        target_port: u16,
+        motd: String,
+        log: PathBuf,
+    ) -> io::Result<Self> {
         let listener = TcpListener::bind((Ipv4Addr::UNSPECIFIED, 0))?;
         let port = listener.local_addr()?.port();
         listener.set_nonblocking(true)?;
         let stop = Arc::new(AtomicBool::new(false));
 
         let flag = stop.clone();
+        // 只记录这个转发上的第一条连接结果：正常玩游戏时条目在列表里，点进去失败
+        // 只可能是「没连上我们」或「我们连不上对端」，这两句日志能直接区分。
+        let reported = Arc::new(AtomicBool::new(false));
         let handle = thread::spawn(move || {
             while !flag.load(Ordering::Relaxed) {
                 match listener.accept() {
                     Ok((stream, _)) => {
                         let _ = stream.set_nodelay(true);
+                        let first = !reported.swap(true, Ordering::Relaxed);
+                        let log = log.clone();
                         // 每条连接单独一个线程：MC 是长连接，互不阻塞
-                        thread::spawn(move || pipe(stream, target, target_port));
+                        thread::spawn(move || {
+                            pipe(stream, target, target_port, port, &log, first)
+                        });
                     }
                     Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
                         thread::sleep(Duration::from_millis(50));
@@ -318,6 +343,7 @@ impl Forward {
         Ok(Self {
             port,
             motd,
+            missing_since: None,
             stop,
             handle: Some(handle),
         })
@@ -335,13 +361,42 @@ impl Drop for Forward {
 }
 
 /// 双向转发一条连接，任一端断开就收尾。
-fn pipe(client: TcpStream, target: Ipv4Addr, target_port: u16) {
-    let Ok(server) = TcpStream::connect_timeout(
+///
+/// `report` 为真时（每个转发端口的第一条连接）把结果写进日志：连不上对端时
+/// 客户端那边只会看到「连接已断开」，原因必须留在本机日志里。
+fn pipe(
+    client: TcpStream,
+    target: Ipv4Addr,
+    target_port: u16,
+    local_port: u16,
+    log: &std::path::Path,
+    report: bool,
+) {
+    let server = match TcpStream::connect_timeout(
         &SocketAddr::from((target, target_port)),
         Duration::from_secs(5),
-    ) else {
-        return;
+    ) {
+        Ok(stream) => stream,
+        Err(err) => {
+            if report {
+                log_to(
+                    log,
+                    "WARN",
+                    &format!(
+                        "本地转发端口 {local_port} 连接对端 {target}:{target_port} 失败：{err}"
+                    ),
+                );
+            }
+            return;
+        }
     };
+    if report {
+        log_to(
+            log,
+            "INFO",
+            &format!("本地转发端口 {local_port} 已连上对端 {target}:{target_port}"),
+        );
+    }
     let _ = server.set_nodelay(true);
     let (Ok(mut client_read), Ok(mut server_write)) = (client.try_clone(), server.try_clone())
     else {
@@ -396,6 +451,16 @@ struct Shared {
     local: Mutex<WorldTracker>,
     /// 对端开放的世界（由 `core` 从开放游戏宣告通道同步写入）
     remote: Mutex<Vec<RemoteWorld>>,
+    /// 最近还在发宣告的对端虚拟 IP（它们的列表为空也算）。用来区分「对端关掉了世界」
+    /// 和「对端的宣告被网络吞了」——后者要保留转发，前者要尽快撤。
+    live_peers: Mutex<Vec<Ipv4Addr>>,
+    /// 对端世界消失后保留转发的时间：宣告是 UDP 单播，网卡切换 / 防火墙抖动会吞包，
+    /// 立刻撤会让列表里的条目闪烁，而重建转发必然换端口（旧条目变成连不上的死地址）。
+    grace: Mutex<Duration>,
+    /// 物理局域网里别人（不一定在房间内）的原生公告：(端口, MOTD) → 最近收到时间。
+    /// 用来判断某个对端世界在本机所在局域网里本来就能被发现——能发现就不再建转发、
+    /// 伪造公告，否则同一个世界会因为「原生一条 + 伪造一条」在列表里出现两次。
+    native: Mutex<HashMap<(u16, String), Instant>>,
     /// 本机伪造公告的签名 (本地转发端口, 网线上的 MOTD)，收到回灌时据此过滤
     fake_announcements: Mutex<HashSet<(u16, String)>>,
     /// 当前要播的伪造公告（供发送线程读取）
@@ -429,16 +494,21 @@ impl Shared {
     }
 
     fn log(&self, level: &str, message: &str) {
-        let line = format!("{} {} lanlink::lan: {}\n", timestamp(), level, message);
-        if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&self.log) {
-            let _ = file.write_all(line.as_bytes());
-        }
+        log_to(&self.log, level, message);
     }
 
     fn log_once(&self, key: &str, level: &str, message: &str) {
         if self.logged.lock().unwrap().insert(key.to_string()) {
             self.log(level, message);
         }
+    }
+}
+
+/// 追加一行日志。转发线程也要写（它拿不到 `Shared`），所以单独抽出来。
+fn log_to(path: &std::path::Path, level: &str, message: &str) {
+    let line = format!("{} {} lanlink::lan: {}\n", timestamp(), level, message);
+    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
+        let _ = file.write_all(line.as_bytes());
     }
 }
 
@@ -470,6 +540,9 @@ impl LanRelay {
             self_ips: self_ips.clone(),
             local: Mutex::new(WorldTracker::default()),
             remote: Mutex::new(Vec::new()),
+            live_peers: Mutex::new(Vec::new()),
+            grace: Mutex::new(FORWARD_GRACE),
+            native: Mutex::new(HashMap::new()),
             fake_announcements: Mutex::new(HashSet::new()),
             announce: Mutex::new(Vec::new()),
             peers,
@@ -548,8 +621,18 @@ impl LanRelay {
     }
 
     /// 更新「对端开放的世界」：`core` 每次状态轮询从开放游戏通道取快照后写入。
-    pub fn set_remote_worlds(&self, worlds: Vec<RemoteWorld>) {
+    ///
+    /// `live_peers` 是「最近还在发宣告的对端」，它的列表为空也算在线。带上它才能
+    /// 区分「对端主动关掉了世界」和「对端的宣告被网络吞了」：后者不能立刻撤转发。
+    pub fn set_remote_worlds(&self, worlds: Vec<RemoteWorld>, live_peers: Vec<Ipv4Addr>) {
         *self.shared.remote.lock().unwrap() = worlds;
+        *self.shared.live_peers.lock().unwrap() = live_peers;
+    }
+
+    /// 测试用：把撤转发的宽限期改短，避免用例真的要等 15 秒。
+    #[cfg(test)]
+    fn set_grace(&self, grace: Duration) {
+        *self.shared.grace.lock().unwrap() = grace;
     }
 
     /// 线程是否都还在跑：既看停止标志，也看 `JoinHandle`——
@@ -577,6 +660,7 @@ impl LanRelay {
         self.shared.announce.lock().unwrap().clear();
         self.shared.fake_announcements.lock().unwrap().clear();
         self.shared.remote.lock().unwrap().clear();
+        self.shared.live_peers.lock().unwrap().clear();
         self.shared.local_games.lock().unwrap().clear_minecraft();
         self.shared.log("INFO", "局域网发现中继已停止");
     }
@@ -599,7 +683,18 @@ fn recv_loop(shared: Arc<Shared>, socket: UdpSocket) {
                     continue;
                 };
                 if !shared.is_self(*source.ip()) {
-                    // 物理局域网里别人的世界：不属于本机，不能同步出去
+                    // 物理局域网里别人的原生公告：不属于本机，不能当本机世界同步出去；
+                    // 但要记下来——如果某个房间成员的世界本来就能这样被发现，就不要再
+                    // 为它建转发和伪造公告，否则列表里会出现两条。
+                    if let Some(announcement) = parse_announcement(&buf[..len]) {
+                        shared.native.lock().unwrap().insert(
+                            (
+                                announcement.port,
+                                announced_motd(&announcement.motd, announcement.port),
+                            ),
+                            Instant::now(),
+                        );
+                    }
                     continue;
                 }
                 let Some(announcement) = parse_announcement(&buf[..len]) else {
@@ -683,7 +778,14 @@ fn bridge_loop(shared: Arc<Shared>) {
         if last_sweep.elapsed() >= Duration::from_secs(1) {
             last_sweep = Instant::now();
             let remote = shared.remote.lock().unwrap().clone();
-            reconcile(&shared, &remote, &mut forwards);
+            let live = shared.live_peers.lock().unwrap().clone();
+            let native = {
+                let mut native = shared.native.lock().unwrap();
+                let now = Instant::now();
+                native.retain(|_, seen| now.saturating_duration_since(*seen) < WORLD_TTL);
+                native.clone()
+            };
+            reconcile(&shared, &remote, &live, &native, &mut forwards);
         }
         thread::sleep(TICK);
     }
@@ -695,19 +797,50 @@ fn bridge_loop(shared: Arc<Shared>) {
 }
 
 /// 让转发与伪造公告跟上当前的对端世界集合。
+///
+/// 撤转发的规则（这是「列表里那条到底能不能用」的关键）：
+/// - 世界变成「本机能原生发现」：立刻撤，原生条目取代转发条目；
+/// - 对端还在正常宣告（哪怕宣告为空）：说明它是主动关掉/换掉了这个世界，撤；
+/// - 对端的宣告断了（对端静默、或不在 peer 快照里）：不能立刻撤——UDP 单播会丢包，
+///   立刻撤会让条目闪烁，重建还会换端口留下死地址。先保留 `grace`，期间恢复就继续用。
 fn reconcile(
     shared: &Shared,
     remote: &[RemoteWorld],
+    live_peers: &[Ipv4Addr],
+    native: &HashMap<(u16, String), Instant>,
     forwards: &mut HashMap<(Ipv4Addr, u16), Forward>,
 ) {
     let peers = shared.peers.lock().unwrap().clone();
-    // 只处理「还在房间里的对端」：对端退出房间时 peer 列表会先于宣告 TTL 更新，
-    // 这里立刻收手，不把一个已经连不通的地址继续摆在列表里。列表为空视为尚未刷新。
-    let wanted: Vec<&RemoteWorld> = remote
-        .iter()
-        .filter(|world| !shared.is_self(world.ip))
-        .filter(|world| peers.is_empty() || peers.contains(&world.ip))
-        .collect();
+    let live: HashSet<Ipv4Addr> = live_peers.iter().copied().collect();
+    let mut wanted: Vec<&RemoteWorld> = Vec::new();
+    // 被 peer 快照剔除的对端：宣告还在来，但 EasyTier 那边暂时看不到它，不能据此撤转发
+    let mut peer_unknown: HashSet<Ipv4Addr> = HashSet::new();
+    let mut native_keys: HashSet<(Ipv4Addr, u16)> = HashSet::new();
+
+    for world in remote {
+        if shared.is_self(world.ip) {
+            continue;
+        }
+        if !peers.is_empty() && !peers.contains(&world.ip) {
+            peer_unknown.insert(world.ip);
+            continue;
+        }
+        if natively_visible(native, world) {
+            // 同一个物理局域网里：原版客户端自己就能收到对方的公告，再伪造一条会让
+            // 列表里出现两个同名世界（IP 不同，原版按 IP:端口 去重，两条都留下）
+            native_keys.insert((world.ip, world.port));
+            shared.log_once(
+                &format!("native-{}-{}", world.ip, world.port),
+                "INFO",
+                &format!(
+                    "对端 {}:{} 的世界本机能原生发现，不再建本地转发",
+                    world.ip, world.port
+                ),
+            );
+            continue;
+        }
+        wanted.push(world);
+    }
 
     for world in &wanted {
         let key = (world.ip, world.port);
@@ -719,7 +852,7 @@ fn reconcile(
         } else {
             world.name.clone()
         };
-        match Forward::start(world.ip, world.port, motd) {
+        match Forward::start(world.ip, world.port, motd, shared.log.clone()) {
             Ok(forward) => {
                 shared
                     .fake_announcements
@@ -746,13 +879,70 @@ fn reconcile(
         }
     }
 
-    // 对端关掉世界 / 离开房间 / 本机断开，都会走到这里：撤公告 + 关端口
-    let stale: Vec<(Ipv4Addr, u16)> = forwards
-        .keys()
-        .copied()
-        .filter(|key| !wanted.iter().any(|world| (world.ip, world.port) == *key))
-        .collect();
-    for key in stale {
+    // 从这里开始是撤转发：理由决定宽限期长短
+    let now = Instant::now();
+    let long = *shared.grace.lock().unwrap();
+    let mut remove: Vec<((Ipv4Addr, u16), &'static str)> = Vec::new();
+    for (key, forward) in forwards.iter_mut() {
+        let present = wanted.iter().any(|world| (world.ip, world.port) == *key);
+        if present {
+            if forward.missing_since.take().is_some() {
+                shared.log(
+                    "INFO",
+                    &format!(
+                        "对端 {} 的开放游戏宣告已恢复，继续使用本地转发端口 {}",
+                        key.0, forward.port
+                    ),
+                );
+            }
+            continue;
+        }
+
+        // 本机已经能原生发现这个世界：原生条目取代转发条目，立刻撤
+        if native_keys.contains(key) {
+            remove.push((*key, "本机已能原生发现该世界"));
+            continue;
+        }
+
+        // 对端在线、而且它这一轮的快照里明确不是这个端口：多半是真关了 / 换了端口。
+        // 仍给一小段宽限，吸收「对端自己的发现抖动导致快照短暂变空」。
+        // 对端不在 peer 快照里、或宣告整个断流：给长宽限，因为那是网络问题，世界可能还开着。
+        let peer_known =
+            !peer_unknown.contains(&key.0) && (peers.is_empty() || peers.contains(&key.0));
+        let reachable = peer_known && live.contains(&key.0);
+        let grace = if reachable {
+            long.min(FORWARD_GRACE_SHORT)
+        } else {
+            long
+        };
+
+        match forward.missing_since {
+            None => {
+                forward.missing_since = Some(now);
+                shared.log(
+                    "WARN",
+                    &format!(
+                        "对端 {}:{} 从宣告里消失（{}），先保留本地转发端口 {}，{} 秒内恢复就继续用",
+                        key.0,
+                        key.1,
+                        if reachable {
+                            "对端在线但快照里没有这个世界"
+                        } else {
+                            "对端的宣告暂时断了"
+                        },
+                        forward.port,
+                        grace.as_secs()
+                    ),
+                );
+            }
+            Some(at) if now.saturating_duration_since(at) >= grace => {
+                remove.push((*key, "超过宽限期仍未恢复"));
+            }
+            Some(_) => {}
+        }
+    }
+
+    for (key, reason) in remove {
         if let Some(forward) = forwards.remove(&key) {
             shared
                 .fake_announcements
@@ -762,7 +952,7 @@ fn reconcile(
             shared.log(
                 "INFO",
                 &format!(
-                    "对端 {}:{} 的世界已关闭或离开房间，移除本地转发端口 {}",
+                    "对端 {}:{} 移除本地转发端口 {}：{reason}",
                     key.0, key.1, forward.port
                 ),
             );
@@ -790,6 +980,23 @@ fn announced_motd(motd: &str, port: u16) -> String {
         .unwrap_or_default()
 }
 
+/// 这个对端世界在本机所在物理局域网里是否本来就能被发现。
+///
+/// 判定依据是「近期收到过同端口、同名字的原生公告」——不猜拓扑、不看 EasyTier 的
+/// 路由形态，所以同网段但组播被 AP 隔离时仍然会走伪造公告，不会把功能判断没。
+/// 名字统一用 `announced_motd` 清洗后再比；`games` 会把名字折叠空白并截断，
+/// 因此一方是另一方的前缀也算同一世界。端口号重复的概率极低，再叠加名字前缀比对。
+fn natively_visible(native: &HashMap<(u16, String), Instant>, world: &RemoteWorld) -> bool {
+    let name = announced_motd(&world.name, world.port);
+    if name.is_empty() {
+        return false;
+    }
+    native.iter().any(|((port, motd), _)| {
+        *port == world.port
+            && (motd == &name || motd.starts_with(name.as_str()) || name.starts_with(motd.as_str()))
+    })
+}
+
 /// 是否已有线程结束（正常运行时只可能是「被迫停止」或 panic）。
 fn any_finished(handles: &[JoinHandle<()>]) -> bool {
     handles.iter().any(|handle| handle.is_finished())
@@ -797,9 +1004,12 @@ fn any_finished(handles: &[JoinHandle<()>]) -> bool {
 
 /// 每 1.5 秒播一次伪造公告，让原版「多人游戏」列表刷出条目。
 ///
-/// 主路径是组播。只有某个网卡发组播失败时，才从回环地址单播一份给本机 `4445`：
-/// 这类环境里原版仍能收到，源地址是 `127.0.0.1`，而转发绑在 `0.0.0.0`，
-/// 从回环连进来同样能进世界。组播成功时不补发，避免同一个世界出现两条。
+/// 主路径是组播，**所有**网卡都发不出去时才从回环地址单播一份给本机 `4445`。
+///
+/// 单播兜底必须按「全部失败」判断，不能按单个网卡判断：虚拟网卡（EasyTier 的 utun）
+/// 发组播一定失败，如果逐网卡兜底，物理网卡成功的同时回环还会补发一份，
+/// 原版按 `IP:端口` 去重，列表里就会出现两条同一个世界（一条 `192.168.x.x`，
+/// 一条 `127.0.0.1`）。
 fn fake_loop(shared: Arc<Shared>, senders: Vec<(Ipv4Addr, UdpSocket)>) {
     let loopback = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).ok();
     let mut last: Option<Instant> = None;
@@ -810,29 +1020,34 @@ fn fake_loop(shared: Arc<Shared>, senders: Vec<(Ipv4Addr, UdpSocket)>) {
             last = Some(Instant::now());
             for announcement in &list {
                 let payload = build_announcement(&announcement.motd, announcement.port);
+                let mut sent = false;
                 for (ip, socket) in &senders {
-                    if let Err(err) =
-                        socket.send_to(payload.as_bytes(), SocketAddr::from((MC_GROUP, MC_PORT)))
+                    match socket
+                        .send_to(payload.as_bytes(), SocketAddr::from((MC_GROUP, MC_PORT)))
                     {
-                        shared.log_once(
+                        Ok(_) => sent = true,
+                        Err(err) => shared.log_once(
                             &format!("fake-{ip}"),
                             "WARN",
                             &format!("向 {MC_GROUP}:{MC_PORT} 发送伪造公告失败（网卡 {ip}）：{err}"),
-                        );
-                        let Some(loopback) = &loopback else {
-                            continue;
-                        };
-                        if let Err(err) = loopback.send_to(
-                            payload.as_bytes(),
-                            SocketAddr::from((Ipv4Addr::LOCALHOST, MC_PORT)),
-                        ) {
-                            shared.log_once(
-                                "fake-loopback",
-                                "WARN",
-                                &format!("单播伪造公告到 127.0.0.1:{MC_PORT} 失败：{err}"),
-                            );
-                        }
+                        ),
                     }
+                }
+                if sent {
+                    continue;
+                }
+                let Some(loopback) = &loopback else {
+                    continue;
+                };
+                if let Err(err) = loopback.send_to(
+                    payload.as_bytes(),
+                    SocketAddr::from((Ipv4Addr::LOCALHOST, MC_PORT)),
+                ) {
+                    shared.log_once(
+                        "fake-loopback",
+                        "WARN",
+                        &format!("单播伪造公告到 127.0.0.1:{MC_PORT} 失败：{err}"),
+                    );
                 }
             }
         }
@@ -1094,6 +1309,49 @@ mod tests {
         assert!(!is_private(Ipv4Addr::new(8, 8, 8, 8)));
     }
 
+    /// 同网段判定：端口与（可截断的）名字都吻合，才算本机能原生发现。
+    #[test]
+    fn native_visibility_requires_port_and_name() {
+        let mut native = HashMap::new();
+        native.insert((62854u16, "xiaji - 测试".to_string()), Instant::now());
+        let world = RemoteWorld {
+            ip: Ipv4Addr::LOCALHOST,
+            port: 62854,
+            name: "xiaji - 测试".to_string(),
+        };
+        assert!(natively_visible(&native, &world));
+
+        // games 下发时可能把名字截断：前缀吻合也算同一世界
+        let truncated = RemoteWorld {
+            name: "xiaji".to_string(),
+            ..world.clone()
+        };
+        assert!(natively_visible(&native, &truncated));
+
+        // 端口不同、名字无关、名字为空都不算
+        assert!(!natively_visible(
+            &native,
+            &RemoteWorld {
+                port: 62855,
+                ..world.clone()
+            }
+        ));
+        assert!(!natively_visible(
+            &native,
+            &RemoteWorld {
+                name: "别人 - 世界".to_string(),
+                ..world.clone()
+            }
+        ));
+        assert!(!natively_visible(
+            &native,
+            &RemoteWorld {
+                name: "  ".to_string(),
+                ..world.clone()
+            }
+        ));
+    }
+
     /// 桥接链路：对端世界 → 本地转发端口 → 伪造公告；撤掉后端口必须释放。
     ///
     /// 对端用本机回环上的 echo 服务代替（只需验证「连上转发能通到目标端口」），
@@ -1132,11 +1390,17 @@ mod tests {
             }
         });
 
-        relay.set_remote_worlds(vec![RemoteWorld {
-            ip: Ipv4Addr::LOCALHOST,
-            port: echo_port,
-            name: "Test World".to_string(),
-        }]);
+        // 宽限期默认 15 秒，这里缩短到 500ms，测试才能等得到撤除
+        relay.set_grace(Duration::from_millis(500));
+
+        relay.set_remote_worlds(
+            vec![RemoteWorld {
+                ip: Ipv4Addr::LOCALHOST,
+                port: echo_port,
+                name: "Test World".to_string(),
+            }],
+            vec![Ipv4Addr::LOCALHOST],
+        );
 
         // 1) 转发端口出现
         let deadline = Instant::now() + Duration::from_secs(5);
@@ -1206,7 +1470,7 @@ mod tests {
         );
 
         // 5) 对端世界消失后，转发端口必须释放
-        relay.set_remote_worlds(Vec::new());
+        relay.set_remote_worlds(Vec::new(), Vec::new());
         let deadline = Instant::now() + Duration::from_secs(5);
         let released = loop {
             if TcpListener::bind((Ipv4Addr::UNSPECIFIED, forward_port)).is_ok() {
@@ -1218,12 +1482,39 @@ mod tests {
             thread::sleep(Duration::from_millis(50));
         };
         assert!(released, "对端世界消失后本地转发端口没有释放");
+
+        // 6) 本机能原生发现的世界不再建转发（否则同一个世界会出现两条）
+        let native_port: u16 = 63111;
+        relay
+            .shared
+            .native
+            .lock()
+            .unwrap()
+            .insert((native_port, "xiaji - 测试".to_string()), Instant::now());
+        relay.set_remote_worlds(
+            vec![RemoteWorld {
+                ip: Ipv4Addr::LOCALHOST,
+                port: native_port,
+                name: "xiaji - 测试".to_string(),
+            }],
+            vec![Ipv4Addr::LOCALHOST],
+        );
+        thread::sleep(Duration::from_millis(2500));
+        assert!(
+            relay.shared.announce.lock().unwrap().is_empty(),
+            "能原生发现的世界不该再建转发"
+        );
     }
 
     #[test]
     fn forward_releases_its_port_on_drop() {
-        let forward = Forward::start(Ipv4Addr::new(10, 126, 126, 9), 25565, "World".to_string())
-            .expect("分配本地端口失败");
+        let forward = Forward::start(
+            Ipv4Addr::new(10, 126, 126, 9),
+            25565,
+            "World".to_string(),
+            PathBuf::from("/dev/null"),
+        )
+        .expect("分配本地端口失败");
         let port = forward.port;
         assert_ne!(port, 0);
         assert_ne!(port, MC_PORT);

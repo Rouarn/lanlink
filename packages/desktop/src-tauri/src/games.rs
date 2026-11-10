@@ -226,6 +226,21 @@ impl RemoteTable {
         self.peers.get(&ip).map(|state| state.games.len()).unwrap_or(0)
     }
 
+    /// 最近 `window` 内还在发宣告的对端（列表为空也算在线）。
+    ///
+    /// 用来区分「对端主动关掉了世界」和「对端的宣告被网络吞了」：前者不能留转发，
+    /// 后者必须留，否则列表里的条目会跟着 UDP 抖动一起闪。
+    fn live(&self, now: Instant, window: Duration) -> Vec<Ipv4Addr> {
+        let mut peers: Vec<Ipv4Addr> = self
+            .peers
+            .iter()
+            .filter(|(_, state)| now.saturating_duration_since(state.seen) < window)
+            .map(|(ip, _)| *ip)
+            .collect();
+        peers.sort_unstable();
+        peers
+    }
+
     /// 应用一条完整快照，返回更新后该对端的游戏数量。
     fn apply(&mut self, ip: Ipv4Addr, games: Vec<WireGame>, now: Instant) -> usize {
         let state = self.peers.entry(ip).or_insert_with(|| PeerState {
@@ -445,6 +460,11 @@ impl GameRelay {
 
     pub fn snapshot(&self) -> Vec<RemoteGameSnapshot> {
         self.shared.remote.lock().unwrap().snapshot()
+    }
+
+    /// 最近 `window` 内还在发宣告的对端虚拟 IP（列表为空也算）。
+    pub fn live_peers(&self, window: Duration) -> Vec<Ipv4Addr> {
+        self.shared.remote.lock().unwrap().live(Instant::now(), window)
     }
 
     pub fn stop(&mut self) {

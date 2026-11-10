@@ -554,20 +554,25 @@ impl Tunnel {
         // 4.2 把对端开放的游戏交给局域网中继：在本地起 TCP 转发并伪造《我的世界》
         // 公告，原版「多人游戏」列表才会刷出条目。数据只走宣告通道，不再另发同步报文，
         // 所以自动发现与手动登记的世界表现一致，同一个世界也只会有一个转发端口。
+        // 同时把「最近还在发宣告的对端」带过去：中继靠它区分「对端关了世界」和
+        // 「宣告被网络吞了」，后者要保留转发，不能跟着 UDP 抖动一起撤。
         if let Some(lan) = &self.lan {
-            let worlds: Vec<lan::RemoteWorld> = self
-                .games
-                .as_ref()
-                .map(|relay| relay.snapshot())
-                .unwrap_or_default()
-                .into_iter()
-                .map(|game| lan::RemoteWorld {
-                    ip: game.ip,
-                    port: game.port,
-                    name: game.name,
-                })
-                .collect();
-            lan.set_remote_worlds(worlds);
+            let (worlds, live) = match self.games.as_ref() {
+                Some(relay) => (
+                    relay
+                        .snapshot()
+                        .into_iter()
+                        .map(|game| lan::RemoteWorld {
+                            ip: game.ip,
+                            port: game.port,
+                            name: game.name,
+                        })
+                        .collect(),
+                    relay.live_peers(Duration::from_secs(6)),
+                ),
+                None => (Vec::new(), Vec::new()),
+            };
+            lan.set_remote_worlds(worlds, live);
         }
 
         status.state = self.state;
