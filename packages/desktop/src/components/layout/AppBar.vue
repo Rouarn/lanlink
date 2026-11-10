@@ -9,7 +9,7 @@ const { view, go, goRoom, openDrawer } = useApp();
 <template>
   <header class="appbar" data-tauri-drag-region>
     <div class="brand" data-tauri-drag-region>
-      <span class="brand-mark"><AppIcon name="brand" :size="17" /></span>
+      <AppIcon name="brand" :size="19" />
       <span class="brand-name">LanLink</span>
     </div>
 
@@ -45,9 +45,9 @@ const { view, go, goRoom, openDrawer } = useApp();
 .appbar {
   display: flex;
   align-items: center;
-  gap: 18px;
-  height: 48px;
-  padding-right: 12px;
+  gap: 26px;
+  height: 56px;
+  padding-right: 20px;
   flex: none;
   border-bottom: 1px solid var(--border);
   background: transparent;
@@ -58,23 +58,14 @@ const { view, go, goRoom, openDrawer } = useApp();
 .brand {
   display: flex;
   align-items: center;
-  gap: 7px;
+  gap: 8px;
   flex: none;
-}
-
-.brand-mark {
-  display: grid;
-  place-items: center;
-  width: 24px;
-  height: 24px;
-  border-radius: 7px;
-  background: var(--accent-soft);
-  color: var(--accent);
+  color: var(--text);
 }
 
 .brand-name {
-  font-size: var(--text-base);
-  font-weight: 700;
+  font-size: var(--text-brand);
+  font-weight: 680;
   letter-spacing: -0.01em;
 }
 
@@ -85,13 +76,14 @@ const { view, go, goRoom, openDrawer } = useApp();
 }
 
 .nav-item {
-  height: 27px;
+  height: 28px;
   padding: 0 11px;
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-tight);
   font-size: var(--text-base);
   font-weight: 600;
   color: var(--text-3);
-  transition: background var(--dur-base) var(--ease), color var(--dur-base) var(--ease);
+  transition: background var(--dur-base) var(--ease), color var(--dur-base) var(--ease),
+    box-shadow var(--dur-base) var(--ease);
 }
 
 .nav-item:hover {
@@ -100,14 +92,15 @@ const { view, go, goRoom, openDrawer } = useApp();
 }
 
 .nav-item.active {
-  background: var(--surface-2);
+  background: var(--surface);
   color: var(--text);
+  box-shadow: 0 0 0 1px var(--border), 0 1px 2px rgba(var(--shadow-rgb), 0.05);
 }
 
 .appbar-end {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: 8px;
   margin-left: auto;
 }
 </style>

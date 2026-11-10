@@ -6,10 +6,16 @@ import { useApp } from "../../stores/app";
 import { useConnection } from "../../stores/connection";
 import AppIcon from "../ui/AppIcon.vue";
 
-const { info, platform, openDrawer, toast } = useApp();
+const { info, version, platform, openDrawer, toast } = useApp();
 const { status } = useConnection();
 
 const platformName = computed(() => (platform.value === "win" ? "Windows" : "macOS"));
+
+/** 版本号来自安装包本身；开发版/正式版按构建模式区分，打包产物一律是正式版。 */
+const releaseLabel = import.meta.env.DEV ? "开发版" : "正式版";
+const versionText = computed(() =>
+  version.value ? `LanLink ${version.value} · ${releaseLabel}` : `LanLink · ${releaseLabel}`,
+);
 
 async function copyDiagnostics(): Promise<void> {
   await copyPlainText(buildDiagnostics(info.value, status.value));
@@ -26,7 +32,7 @@ async function copyDiagnostics(): Promise<void> {
 
     <div class="kv">
       <span>版本</span>
-      <span>LanLink 0.1.0 · 开发版</span>
+      <span>{{ versionText }}</span>
     </div>
     <div class="kv">
       <span>平台</span>

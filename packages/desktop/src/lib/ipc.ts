@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { getVersion } from "@tauri-apps/api/app";
 import type {
   AppInfo,
   ElevationInfo,
@@ -15,6 +16,18 @@ import type {
  */
 export const ipc = {
   appInfo: (): Promise<AppInfo> => invoke<AppInfo>("app_info"),
+
+  /**
+   * 应用版本号：取自安装包自身的版本（tauri.conf.json，出包时与 tag 同步），
+   * 不读 package.json，避免两边漂移。非 Tauri 环境或权限不足时返回空串。
+   */
+  appVersion: async (): Promise<string> => {
+    try {
+      return await getVersion();
+    } catch {
+      return "";
+    }
+  },
 
   getStatus: (): Promise<TunnelStatus> => invoke<TunnelStatus>("get_status"),
 

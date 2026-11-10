@@ -37,11 +37,16 @@ html[data-platform="windows"] .window {
 
 /* 顶部工具栏：macOS 给红绿灯留位置，Windows 用系统标题栏、无需留白 */
 .appbar {
-  padding-left: 18px;
+  padding-left: 20px;
 }
 
 html[data-platform="mac"] .appbar {
   padding-left: 88px;
+}
+
+html[data-platform="windows"] .appbar {
+  height: 52px;
+  background: var(--window-bg);
 }
 
 .content {
@@ -49,7 +54,7 @@ html[data-platform="mac"] .appbar {
   min-height: 0;
   overflow-y: auto;
   overflow-x: hidden;
-  padding: var(--space-10);
+  padding: 32px 32px 28px;
   background: var(--glass-content);
   scrollbar-width: thin;
   scrollbar-color: var(--border-strong) transparent;
@@ -87,7 +92,7 @@ html[data-platform="windows"] .content {
 
 .screen.narrow {
   max-width: 600px;
-  padding-top: var(--space-7);
+  padding-top: 18px;
 }
 
 @keyframes screenIn {

@@ -4,7 +4,7 @@
 /* 标题与正文 */
 .eyebrow {
   margin: 0 0 var(--space-4);
-  font-size: var(--text-sm);
+  font-size: 11px;
   font-weight: 650;
   letter-spacing: 0.09em;
   color: var(--text-3);
@@ -29,7 +29,7 @@
 
 .lede {
   max-width: 56ch;
-  margin: 0 0 var(--space-9);
+  margin: 0 0 22px;
   font-size: var(--text-md);
   line-height: 1.7;
   color: var(--text-2);
@@ -166,7 +166,7 @@
 .btn-sm {
   height: 28px;
   padding: 0 10px;
-  border-radius: 7px;
+  border-radius: var(--radius-tight);
   font-size: var(--text-sm);
 }
 
@@ -186,7 +186,7 @@
   place-items: center;
   width: 30px;
   height: 30px;
-  border-radius: 7px;
+  border-radius: var(--radius-tight);
   color: var(--text-3);
   transition: background var(--dur-base) var(--ease), color var(--dur-base) var(--ease);
 }
@@ -291,7 +291,7 @@
 .input-sm {
   height: 30px;
   padding: 0 9px;
-  border-radius: 7px;
+  border-radius: var(--radius-tight);
   font-size: var(--text-sm);
 }
 
@@ -477,7 +477,7 @@
   justify-content: space-between;
   gap: var(--space-5);
   padding: var(--space-3) 0;
-  font-size: var(--text-base);
+  font-size: 12px;
 }
 
 .kv > span:first-child {

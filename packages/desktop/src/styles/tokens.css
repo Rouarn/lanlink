@@ -17,6 +17,7 @@
   --text-lg: 14.5px;
   --text-title: 21px;
   --text-hero: 30px;
+  --text-brand: 13.5px;
 
   --space-1: 4px;
   --space-2: 6px;
@@ -35,6 +36,7 @@
   --radius-lg: 10px;
   --radius-xl: 12px;
   --radius-window: 14px;
+  --radius-tight: 7px;
 
   --ease: cubic-bezier(0.2, 0.7, 0.3, 1);
   --dur-fast: 0.12s;
@@ -67,7 +69,7 @@
   --accent-soft: #f7e9e2;
   --accent-soft-2: #f0d6c9;
   --ok: #23734d;
-  --ok-dot: #2c8a5e;
+  --ok-dot: #34a06c;
   --ok-soft: #e6f3ec;
   --warn: #8c5900;
   --warn-soft: #fbf0dc;

@@ -4,6 +4,8 @@ import type { AppInfo, Platform, RoomScreen, ViewKey } from "../types";
 
 /** 全局界面状态：导航、平台、应用信息、轻提示。连接状态不在这里。 */
 const info = ref<AppInfo | null>(null);
+/** 安装包版本号（来自 tauri.conf.json），非 Tauri 环境为空串 */
+const version = ref("");
 const view = ref<ViewKey>("room");
 const roomScreen = ref<RoomScreen>("create");
 const drawerOpen = ref(false);
@@ -16,7 +18,9 @@ export const platform = computed<Platform>(() =>
 
 /** 只在有 AppInfo 之后调用一次：设置 data-platform 供样式隔离 */
 async function loadInfo(): Promise<void> {
-  info.value = await ipc.appInfo();
+  const [nextInfo, nextVersion] = await Promise.all([ipc.appInfo(), ipc.appVersion()]);
+  info.value = nextInfo;
+  version.value = nextVersion;
   document.documentElement.dataset.platform = platform.value;
 }
 
@@ -48,6 +52,7 @@ export function useApp() {
 
   return {
     info,
+    version,
     view,
     roomScreen,
     drawerOpen,
