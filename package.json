@@ -1,0 +1,16 @@
+{
+  "name": "lanlink",
+  "private": true,
+  "version": "0.1.0",
+  "description": "内置 EasyTier 核心的跨平台一键局域网联机工具",
+  "scripts": {
+    "dev": "pnpm -F @lanlink/desktop tauri dev",
+    "build": "pnpm -F @lanlink/desktop tauri build",
+    "build:debug": "pnpm -F @lanlink/desktop tauri build --debug",
+    "check": "pnpm -F @lanlink/desktop build && cargo check --manifest-path packages/desktop/src-tauri/Cargo.toml",
+    "build:server": "mkdir -p packages/server/dist && cd packages/server && GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags \"-s -w\" -o dist/lanlink-rooms-linux-amd64 .",
+    "build:server:arm64": "mkdir -p packages/server/dist && cd packages/server && GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -ldflags \"-s -w\" -o dist/lanlink-rooms-linux-arm64 .",
+    "tauri:cli": "pnpm -F @lanlink/desktop tauri"
+  },
+  "packageManager": "pnpm@12.16.1"
+}

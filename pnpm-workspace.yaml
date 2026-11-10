@@ -1,0 +1,6 @@
+# 只列举需要参与 pnpm 安装的目录，不用通配符：
+# packages/server 是 Go 工程、packages/core 是二进制，都不应被扫描进来。
+packages:
+  - "packages/desktop"
+  - "packages/shared"
+  - "packages/mobile"

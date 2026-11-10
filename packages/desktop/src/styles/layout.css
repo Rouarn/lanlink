@@ -1,0 +1,199 @@
+/* 窗口骨架：侧边栏、内容区与分组栅格 */
+.window {
+  display: flex;
+  height: 100%;
+  border-radius: 10px;
+  overflow: hidden;
+  border: 0.5px solid var(--separator);
+}
+
+/* 侧边栏：半透明材质，叠一层淡色以收敛透过来的壁纸 */
+.sidebar {
+  width: 212px;
+  flex: 0 0 212px;
+  display: flex;
+  flex-direction: column;
+  background: var(--sidebar-tint);
+  user-select: none;
+}
+
+.titlebar-space {
+  height: 38px;
+  flex: 0 0 38px;
+}
+
+.sidebar-brand {
+  padding: 0 19px 10px;
+}
+
+.brand-logo {
+  display: block;
+  height: 30px;
+  width: auto;
+  user-select: none;
+}
+
+.nav {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 0 10px;
+}
+
+.nav-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 28px;
+  padding: 0 9px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  font-size: 13px;
+  font-family: inherit;
+  text-align: left;
+  cursor: default;
+}
+
+.nav-item:hover {
+  background: var(--hover);
+}
+
+.nav-item.active {
+  background: var(--accent);
+  color: #ffffff;
+  font-weight: 500;
+}
+
+.nav-icon {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 16px;
+  opacity: 0.75;
+}
+
+.nav-item.active .nav-icon {
+  opacity: 1;
+}
+
+.sidebar-footer {
+  margin-top: auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 12px 19px 14px;
+  font-size: 11px;
+  color: var(--label);
+}
+
+/* 内容区：不透明 */
+.content {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--window-bg);
+  border-left: 0.5px solid var(--separator);
+}
+
+.content-header {
+  height: 52px;
+  flex: 0 0 52px;
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  padding: 0 22px 10px;
+}
+
+h1 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: -0.1px;
+}
+
+.status-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--label);
+}
+
+.content-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 4px 22px 24px;
+}
+
+/* 分组卡片（grouped inset） */
+.group {
+  margin-bottom: 20px;
+}
+
+.group-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--label);
+  padding: 0 2px 6px;
+}
+
+/* 分组标题右侧操作（例如「清空」历史房间） */
+.group-title.has-action {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.group-body {
+  background: var(--group-bg);
+  border-radius: 10px;
+  border: 0.5px solid var(--group-border);
+  overflow: hidden;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  min-height: 34px;
+  padding: 7px 12px;
+}
+
+.row + .row {
+  border-top: 0.5px solid var(--separator);
+}
+
+.row-label {
+  color: var(--label);
+  font-size: 13px;
+  flex: 0 0 auto;
+}
+
+.row-value {
+  font-size: 13px;
+  text-align: right;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.row-value.small {
+  font-size: 12px;
+}
+
+.row-value.path {
+  direction: rtl;
+  text-align: left;
+  max-width: 62%;
+}
+
+.actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 2px;
+}

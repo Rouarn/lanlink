@@ -1,0 +1,142 @@
+name: Build installers
+
+# 自用构建：手动触发，或打 v* 标签时自动跑。
+# 产物统一改名成「LanLink-<版本>-<平台>-<架构>.<后缀>」，避免同名混淆。
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+concurrency:
+  group: installers-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  # 与本地 packages/core 保持一致；仓库不提交二进制，CI 按平台从官方 release 下载。
+  EASYTIER_VERSION: v2.6.4
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macos-arm64
+            os: macos-latest
+            target: aarch64-apple-darwin
+            platform_dir: macos-arm64
+            easytier_asset: easytier-macos-aarch64-v2.6.4.zip
+            bundles: app,dmg
+            artifact: LanLink-0.1.0-macos-arm64.dmg
+          - name: macos-x64
+            os: macos-15-intel
+            target: x86_64-apple-darwin
+            platform_dir: macos-x64
+            easytier_asset: easytier-macos-x86_64-v2.6.4.zip
+            bundles: app,dmg
+            artifact: LanLink-0.1.0-macos-x64.dmg
+          - name: windows-x64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+            platform_dir: windows-x64
+            easytier_asset: easytier-windows-x86_64-v2.6.4.zip
+            bundles: nsis
+            artifact: LanLink-0.1.0-windows-x64-setup.exe
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 12
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: packages/desktop/src-tauri -> target
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Download EasyTier core (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          dest="packages/core/${{ matrix.platform_dir }}"
+          mkdir -p "$dest"
+          curl -fL --retry 3 --retry-delay 2 \
+            -o "$RUNNER_TEMP/easytier.zip" \
+            "https://github.com/EasyTier/EasyTier/releases/download/${EASYTIER_VERSION}/${{ matrix.easytier_asset }}"
+          unzip -q "$RUNNER_TEMP/easytier.zip" -d "$RUNNER_TEMP/easytier"
+          find "$RUNNER_TEMP/easytier" -type f -name easytier-core -exec cp {} "$dest/easytier-core" \;
+          find "$RUNNER_TEMP/easytier" -type f -name easytier-cli -exec cp {} "$dest/easytier-cli" \;
+          chmod +x "$dest/easytier-core" "$dest/easytier-cli"
+          "$dest/easytier-core" --version || true
+          test -x "$dest/easytier-core"
+
+      - name: Download EasyTier core (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $dest = "packages/core/${{ matrix.platform_dir }}"
+          New-Item -ItemType Directory -Force -Path $dest | Out-Null
+          $zip = Join-Path $env:RUNNER_TEMP "easytier.zip"
+          $url = "https://github.com/EasyTier/EasyTier/releases/download/$env:EASYTIER_VERSION/${{ matrix.easytier_asset }}"
+          Invoke-WebRequest -Uri $url -OutFile $zip
+          Expand-Archive -Path $zip -DestinationPath (Join-Path $env:RUNNER_TEMP "easytier") -Force
+          $root = Join-Path $env:RUNNER_TEMP "easytier"
+          # core/cli 之外还要带上 wintun.dll 等运行期依赖，否则创建 TUN 网卡会失败。
+          Get-ChildItem -Recurse $root -File |
+            Where-Object { $_.Name -notlike "easytier-web*" } |
+            ForEach-Object { Copy-Item $_.FullName (Join-Path $dest $_.Name) -Force }
+          Get-ChildItem $dest | Format-Table Name, Length
+          if (-not (Test-Path "$dest/easytier-core.exe")) { throw "easytier-core.exe 未就位" }
+
+      - name: Build bundle
+        # 无签名证书时显式走 Ad Hoc（macOS）；Windows 不签名。
+        env:
+          APPLE_SIGNING_IDENTITY: "-"
+        run: pnpm -F @lanlink/desktop tauri build --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
+
+      - name: Rename macOS installer
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          src="packages/desktop/src-tauri/target/${{ matrix.target }}/release/bundle/dmg/${{ matrix.artifact }}"
+          if [ ! -f "$src" ]; then
+            src=$(find "packages/desktop/src-tauri/target/${{ matrix.target }}/release/bundle/dmg" -name "*.dmg" -type f | head -n 1)
+          fi
+          mv "$src" "${{ matrix.artifact }}"
+          ls -lh "${{ matrix.artifact }}"
+
+      - name: Rename Windows installer
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $src = Get-ChildItem "packages/desktop/src-tauri/target/${{ matrix.target }}/release/bundle/nsis/*-setup.exe" | Select-Object -First 1
+          Move-Item $src.FullName "${{ matrix.artifact }}"
+          Get-Item "${{ matrix.artifact }}" | Format-List Name, Length
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}
+          if-no-files-found: error
+          retention-days: 14
