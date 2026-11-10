@@ -4,15 +4,13 @@
   ExecWait 'schtasks /Delete /TN LanLink /F'
 !macroend
 
-; 覆盖安装前清掉旧版本留下的 WinDivert 驱动。
-; 0.1.0 早期安装包把 WinDivert64.sys / Packet.dll 一起分发过，现在不再打包：
-; 既不是运行必需（没有启用 EasyTier 的 --enable-udp-broadcast-relay），
-; 又会因为内核驱动被安全软件拦截，让 NSIS 覆盖时报 "Error opening file for writing"。
-; 已经装过旧版的机器需要在这里删除，否则旧文件会一直残留。
+; 覆盖安装前清掉旧版本留下的 WinDivert 内核驱动。
+; 只有 .sys 不再分发：写驱动文件会被安全软件/驱动保护拦下来，让 NSIS 覆盖时报
+; "Error opening file for writing"。已经装过旧版的机器需要在这里删除，否则会一直残留。
+; 注意：Packet.dll 现在是 easytier-core.exe 的静态导入依赖，必须保留，
+; 它会由本次安装正常覆盖写入，不能在这里删除。
 !macro NSIS_HOOK_PREINSTALL
   ClearErrors
   SetFileAttributes "$INSTDIR\core\windows-x64\WinDivert64.sys" NORMAL
   Delete "$INSTDIR\core\windows-x64\WinDivert64.sys"
-  SetFileAttributes "$INSTDIR\core\windows-x64\Packet.dll" NORMAL
-  Delete "$INSTDIR\core\windows-x64\Packet.dll"
 !macroend

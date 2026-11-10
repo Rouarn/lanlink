@@ -127,12 +127,15 @@ jobs:
           Invoke-WebRequest -Uri $url -OutFile $zip
           Expand-Archive -Path $zip -DestinationPath (Join-Path $env:RUNNER_TEMP "easytier") -Force
           $root = Join-Path $env:RUNNER_TEMP "easytier"
-          # 只带运行必需的三个文件：core / cli / wintun.dll（创建 TUN 网卡用）。
-          # 不打包 WinDivert64.sys、Packet.dll：LanLink 没有启用 EasyTier 的
+          # 必需文件 = 两个 exe + 它们实际依赖的 DLL。用 objdump 查过 easytier-core.exe
+          # 的导入表，除系统 DLL 外只有一个 packet.dll（libpnet 数据链路），缺了就
+          # STATUS_DLL_NOT_FOUND (0xC0000135) 直接退出；wintun.dll 是创建 TUN 网卡时
+          # 动态加载的，也必须带上。WinDivert.dll 不在导入表里，上游包也没有这个文件。
+          # 只排除内核驱动 WinDivert64.sys：LanLink 没启用 EasyTier 的
           # --enable-udp-broadcast-relay（广播转发由 broadcast.rs 自己实现），
-          # 这个内核驱动既用不到，又会被杀软/驱动保护拦截，导致 NSIS 安装时
-          # 报 "Error opening file for writing: ...\WinDivert64.sys" 直接中断。
-          $needed = @("easytier-core.exe", "easytier-cli.exe", "wintun.dll")
+          # 而 .sys 写盘会被杀软/驱动保护拦截，让 NSIS 报
+          # "Error opening file for writing: ...\WinDivert64.sys" 中断安装。
+          $needed = @("easytier-core.exe", "easytier-cli.exe", "wintun.dll", "Packet.dll")
           foreach ($name in $needed) {
             $src = Get-ChildItem -Recurse $root -File -Filter $name | Select-Object -First 1
             if (-not $src) { throw "$name 未在 EasyTier 发布包中找到" }
