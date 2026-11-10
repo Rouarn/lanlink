@@ -1,3 +1,4 @@
+mod broadcast;
 mod config;
 mod core;
 mod elevate;
@@ -86,6 +87,7 @@ fn save_settings(relays: String, resolver_base_url: Option<String>) -> Result<Se
     settings.silent_elevate = existing.silent_elevate;
     settings.silent_prompted = existing.silent_prompted;
     settings.lan_discovery = existing.lan_discovery;
+    settings.broadcast_ports = existing.broadcast_ports.clone();
     settings.save()?;
     Ok(settings)
 }
@@ -97,6 +99,19 @@ fn set_lan_discovery(state: State<'_, AppState>, enabled: bool) -> Result<Status
     settings.lan_discovery = enabled;
     settings.save()?;
     Ok(state.tunnel.lock().unwrap().set_lan_discovery(enabled))
+}
+
+/// 设置通用 UDP 广播转发的端口表（空数组 = 关闭）；界面定稿前先只保留接口。
+#[tauri::command]
+fn set_broadcast_ports(state: State<'_, AppState>, ports: Vec<u16>) -> Result<Status, String> {
+    let mut settings = Settings::load();
+    settings.broadcast_ports = broadcast::normalize_ports(&ports);
+    settings.save()?;
+    Ok(state
+        .tunnel
+        .lock()
+        .unwrap()
+        .set_broadcast_ports(settings.broadcast_ports.clone()))
 }
 
 /// 提权方式（Windows 计划任务静默提权 / 其他平台固定启动即提权）。
@@ -580,6 +595,7 @@ pub fn run() {
             get_settings,
             save_settings,
             set_lan_discovery,
+            set_broadcast_ports,
             elevation_info,
             set_silent_elevate,
             create_room,

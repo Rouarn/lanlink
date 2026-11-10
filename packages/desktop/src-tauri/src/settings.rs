@@ -26,10 +26,17 @@ pub struct Settings {
     /// 《我的世界》局域网发现中继：默认开启，可在设置页关闭
     #[serde(default = "default_true")]
     pub lan_discovery: bool,
+    /// 通用 UDP 广播转发端口表（CS 1.6 / 魔兽 / 帝国时代等）；空数组表示关闭
+    #[serde(default = "default_broadcast_ports")]
+    pub broadcast_ports: Vec<u16>,
 }
 
 fn default_true() -> bool {
     true
+}
+
+fn default_broadcast_ports() -> Vec<u16> {
+    crate::broadcast::default_ports()
 }
 
 /// 手写 `Default`：`lan_discovery` 必须是 `true`（derive 会得到 false）。
@@ -42,6 +49,7 @@ impl Default for Settings {
             silent_elevate: false,
             silent_prompted: false,
             lan_discovery: true,
+            broadcast_ports: default_broadcast_ports(),
         }
     }
 }
@@ -274,6 +282,18 @@ mod tests {
         // 用户关掉之后要能记住
         let off: Settings = serde_json::from_str(r#"{"lan_discovery":false}"#).unwrap();
         assert!(!off.lan_discovery);
+    }
+
+    #[test]
+    fn broadcast_ports_default_in_but_can_be_cleared() {
+        let defaults = Settings::default().broadcast_ports;
+        assert!(defaults.contains(&27015));
+        // 旧设置文件没有这个字段：用内置默认表
+        let legacy: Settings = serde_json::from_str(r#"{"lan_discovery":true}"#).unwrap();
+        assert_eq!(legacy.broadcast_ports, defaults);
+        // 用户清空即关闭广播转发
+        let off: Settings = serde_json::from_str(r#"{"broadcast_ports":[]}"#).unwrap();
+        assert!(off.broadcast_ports.is_empty());
     }
 
     #[test]

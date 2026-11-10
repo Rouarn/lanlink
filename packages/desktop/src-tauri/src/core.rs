@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 
 use serde::Serialize;
 
+use crate::broadcast;
 use crate::config;
 use crate::lan;
 use crate::proc;
@@ -128,6 +129,10 @@ pub struct Tunnel {
     node_cache: Option<(Option<String>, Option<String>, Option<String>)>,
     /// 上一次记录「CLI 太慢」日志的时间，避免每次轮询都写一行
     last_slow_cli: Option<Instant>,
+    /// 通用 UDP 广播转发（CS 1.6 / 魔兽 / 帝国时代这类老游戏）
+    bc: Option<broadcast::BroadcastRelay>,
+    broadcast_ports: Vec<u16>,
+    bc_retry_at: Option<Instant>,
 }
 
 impl Tunnel {
@@ -157,6 +162,9 @@ impl Tunnel {
             lan_retry_at: None,
             node_cache: None,
             last_slow_cli: None,
+            bc: None,
+            broadcast_ports: broadcast::normalize_ports(&Settings::load().broadcast_ports),
+            bc_retry_at: None,
         };
         // 上次以 root 运行留下的日志文件：这次启动就顺手把权限交还给登录用户
         tunnel.relax_log_permissions();
@@ -248,6 +256,7 @@ impl Tunnel {
     pub fn stop(&mut self) -> Status {
         // 先停中继：断开房间后要立刻停播并关掉本地转发端口
         self.lan = None;
+        self.bc = None;
         self.node_cache = None;
         if let Some(mut child) = self.child.take() {
             let _ = child.kill();
@@ -454,48 +463,94 @@ impl Tunnel {
         self.status()
     }
 
+    /// 设置通用 UDP 广播转发端口表（空数组 = 关闭），立即生效。
+    pub fn set_broadcast_ports(&mut self, ports: Vec<u16>) -> Status {
+        self.broadcast_ports = broadcast::normalize_ports(&ports);
+        self.bc = None;
+        self.bc_retry_at = None;
+        self.status()
+    }
+
     /// 让中继跟上连接状态：连上才启动，断开/关闭开关时立即停。
     fn sync_lan(&mut self) {
-        let wanted = self.lan_enabled && self.state == State::Connected && self.room.is_some();
-        if !wanted {
+        let connected = self.state == State::Connected && self.room.is_some();
+
+        // 1. 《我的世界》局域网发现：独立开关，关掉它不影响广播转发
+        if !(self.lan_enabled && connected) {
             self.lan = None;
-            return;
-        }
-        if let Some(relay) = self.lan.as_ref() {
-            if relay.alive() {
-                return;
+        } else {
+            let lan_alive = self.lan.as_ref().map(|relay| relay.alive()).unwrap_or(false);
+            if !lan_alive {
+                if let Some(relay) = self.lan.take() {
+                    // 线程因致命错误退出：记下原因，重建时带退避
+                    self.lan_error = relay.error();
+                    if self.lan_error.is_some() {
+                        self.lan_retry_at = Some(Instant::now() + LAN_RETRY_INTERVAL);
+                    }
+                }
+                let cooling = self
+                    .lan_retry_at
+                    .map(|at| Instant::now() < at)
+                    .unwrap_or(false);
+                if !cooling {
+                    if let Some(name) = self.room.as_ref().map(|room| room.name.clone()) {
+                        match lan::LanRelay::start(
+                            self.cli.clone(),
+                            config::RPC_PORTAL.to_string(),
+                            name,
+                            self.log_path(),
+                        ) {
+                            Ok(relay) => {
+                                self.lan = Some(relay);
+                                self.lan_error = None;
+                                self.lan_retry_at = None;
+                            }
+                            Err(err) => {
+                                eprintln!("[lanlink] 局域网发现中继启动失败：{err}");
+                                self.lan_error = Some(err);
+                                self.lan_retry_at = Some(Instant::now() + LAN_RETRY_INTERVAL);
+                            }
+                        }
+                    }
+                }
             }
-            // 线程因致命错误退出：记下原因，下面重建（带退避）
-            self.lan_error = relay.error();
-            self.lan = None;
-            if self.lan_error.is_some() {
-                self.lan_retry_at = Some(Instant::now() + LAN_RETRY_INTERVAL);
-            }
         }
-        if self
-            .lan_retry_at
-            .map(|at| Instant::now() < at)
-            .unwrap_or(false)
-        {
-            return;
-        }
-        let Some(name) = self.room.as_ref().map(|room| room.name.clone()) else {
-            return;
-        };
-        match lan::LanRelay::start(
-            self.cli.clone(),
-            config::RPC_PORTAL.to_string(),
-            name,
-            self.log_path(),
-        ) {
-            Ok(relay) => {
-                self.lan = Some(relay);
-                self.lan_error = None;
+
+        // 2. 通用 UDP 广播转发（端口表为空即关闭）
+        if !(connected && !self.broadcast_ports.is_empty()) {
+            self.bc = None;
+        } else if !self.bc.as_ref().map(|relay| relay.alive()).unwrap_or(false) {
+            if let Some(relay) = self.bc.take() {
+                // 线程因致命错误退出时把原因写进日志，避免广播转发静默失效
+                if let Some(err) = relay.error() {
+                    self.note("WARN", &format!("UDP 广播转发已停止：{err}"));
+                    self.bc_retry_at = Some(Instant::now() + LAN_RETRY_INTERVAL);
+                }
             }
-            Err(err) => {
-                eprintln!("[lanlink] 局域网发现中继启动失败：{err}");
-                self.lan_error = Some(err);
-                self.lan_retry_at = Some(Instant::now() + LAN_RETRY_INTERVAL);
+            let cooling = self
+                .bc_retry_at
+                .map(|at| Instant::now() < at)
+                .unwrap_or(false);
+            if !cooling {
+                match broadcast::BroadcastRelay::start(
+                    self.cli.clone(),
+                    config::RPC_PORTAL.to_string(),
+                    &self.broadcast_ports,
+                    self.log_path(),
+                ) {
+                    Ok(relay) => {
+                        self.bc = Some(relay);
+                        self.bc_retry_at = None;
+                    }
+                    Err(err) => {
+                        eprintln!("[lanlink] UDP 广播转发启动失败：{err}");
+                        self.note(
+                            "WARN",
+                            &format!("UDP 广播转发启动失败：{err}（{} 秒后重试）", LAN_RETRY_INTERVAL.as_secs()),
+                        );
+                        self.bc_retry_at = Some(Instant::now() + LAN_RETRY_INTERVAL);
+                    }
+                }
             }
         }
     }

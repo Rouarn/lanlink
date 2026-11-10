@@ -61,6 +61,8 @@ export interface Settings {
   silent_prompted: boolean;
   /** 《我的世界》局域网发现中继开关（默认开启） */
   lan_discovery: boolean;
+  /** 通用 UDP 广播转发端口表（CS 1.6 / 魔兽 / 帝国时代等），空数组表示关闭 */
+  broadcast_ports: number[];
 }
 
 /** 提权方式（Windows 计划任务静默提权） */

@@ -222,7 +222,7 @@ fn parse_sync(bytes: &[u8]) -> Option<SyncMessage> {
 // ---------------------------------------------------------------------------
 
 /// 枚举本机 IPv4（跳过回环 / 链路本地），用作组播绑定与源地址。
-fn local_ipv4s() -> Vec<Ipv4Addr> {
+pub(crate) fn local_ipv4s() -> Vec<Ipv4Addr> {
     let mut ips = Vec::new();
     let Ok(interfaces) = if_addrs::get_if_addrs() else {
         return ips;
@@ -282,7 +282,7 @@ fn parse_peer_ip(raw: &str) -> Option<Ipv4Addr> {
 
 /// 私有网段判断：`easytier-cli` 暂时拿不到对端列表时的兜底，
 /// 只接受内网地址，不会把公网来源当成房间成员。
-fn is_private(ip: Ipv4Addr) -> bool {
+pub(crate) fn is_private(ip: Ipv4Addr) -> bool {
     ip.is_private() || ip.octets()[0] == 100 && (64..128).contains(&ip.octets()[1])
 }
 
@@ -847,28 +847,22 @@ fn send_sync(shared: &Shared, socket: &UdpSocket) {
     }
 }
 
-/// 从 `easytier-cli peer` 取对端虚拟 IP（每 5 秒一次）。
-fn probe_peers(shared: &Shared) -> Vec<Ipv4Addr> {
-    let Some(cli) = shared.cli.as_ref() else {
+/// 从 `easytier-cli peer` 取对端虚拟 IP（供局域网发现与广播转发共用）。
+pub(crate) fn peers_from_cli(cli: Option<&std::path::Path>, portal: &str) -> Vec<Ipv4Addr> {
+    let Some(cli) = cli else {
         return Vec::new();
     };
     let Ok(output) = proc::command(cli)
         .arg("-p")
-        .arg(&shared.portal)
+        .arg(portal)
         .arg("-o")
         .arg("json")
         .arg("peer")
         .output()
     else {
-        shared.log_once("peer-cli", "WARN", "调用 easytier-cli 获取对端列表失败");
         return Vec::new();
     };
     if !output.status.success() {
-        shared.log_once(
-            "peer-cli-status",
-            "WARN",
-            "easytier-cli peer 返回非零退出码，暂时拿不到对端列表",
-        );
         return Vec::new();
     }
     let Ok(value) = serde_json::from_slice::<serde_json::Value>(&output.stdout) else {
@@ -886,6 +880,11 @@ fn probe_peers(shared: &Shared) -> Vec<Ipv4Addr> {
         }
     }
     peers
+}
+
+/// 从 `easytier-cli peer` 取对端虚拟 IP（每 5 秒一次）。
+fn probe_peers(shared: &Shared) -> Vec<Ipv4Addr> {
+    peers_from_cli(shared.cli.as_deref(), &shared.portal)
 }
 
 /// 每 1.5 秒向本机组播地址播一次伪造公告，让原版「多人游戏」列表刷出条目。
