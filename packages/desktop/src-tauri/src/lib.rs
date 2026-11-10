@@ -378,6 +378,16 @@ fn elevate_at_launch(args: &[String]) {
         return;
     }
 
+    // 开发态（debug 构建）默认跳过启动即提权：
+    // `tauri dev` 跑的是 target/debug 下的裸可执行文件，走授权会让当前进程先退出，
+    // dev 会话随之结束（Vite 也被带走），root 实例没有 dev server 可加载，窗口就不出现。
+    // 连接时的提权路径不受影响（点「连接」仍按原有方式请求授权）。
+    // 要在 dev 里验证真实的启动提权，设 LANLINK_FORCE_ELEVATE=1。
+    if cfg!(debug_assertions) && std::env::var_os("LANLINK_FORCE_ELEVATE").is_none() {
+        eprintln!("[lanlink] debug 构建：跳过启动即提权（验证请设 LANLINK_FORCE_ELEVATE=1）");
+        return;
+    }
+
     // 已经有实例在跑（root 实例持有 /tmp 下的锁）：不再重复索要授权
     if single::acquire().is_err() {
         return;
