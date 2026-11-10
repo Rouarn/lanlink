@@ -1,0 +1,109 @@
+/* 应用外壳：窗口、内容区与平台差异。
+   平台差异只在这里用 html[data-platform] 隔离，组件样式不感知平台。 */
+
+.window {
+  display: flex;
+  flex-direction: column;
+  position: relative;
+  height: 100%;
+  overflow: hidden;
+  color: var(--text);
+  background: var(--window-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-window);
+  isolation: isolate;
+}
+
+/* macOS：透明窗口 + vibrancy，外壳用玻璃材质 */
+html[data-platform="mac"] .window {
+  background: var(--glass);
+  -webkit-backdrop-filter: blur(34px) saturate(1.35);
+  backdrop-filter: blur(34px) saturate(1.35);
+}
+
+/* Windows：系统原生标题栏、窗口不透明，四角不做圆角 */
+html[data-platform="windows"],
+html[data-platform="windows"] body {
+  background: var(--window-bg);
+}
+
+html[data-platform="windows"] .window {
+  border: 0;
+  border-radius: 0;
+  background: var(--window-bg);
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+}
+
+/* 顶部工具栏：macOS 给红绿灯留位置，Windows 用系统标题栏、无需留白 */
+.appbar {
+  padding-left: 18px;
+}
+
+html[data-platform="mac"] .appbar {
+  padding-left: 88px;
+}
+
+.content {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: var(--space-10);
+  background: var(--glass-content);
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-strong) transparent;
+}
+
+html[data-platform="windows"] .content {
+  background: var(--window-bg);
+}
+
+.content::-webkit-scrollbar {
+  width: 10px;
+}
+
+.content::-webkit-scrollbar-thumb {
+  border: 3px solid transparent;
+  border-radius: var(--radius-md);
+  background: var(--border-strong);
+  background-clip: content-box;
+}
+
+.content::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.screen {
+  display: block;
+  max-width: 720px;
+  margin: 0 auto;
+  animation: screenIn var(--dur-slow) var(--ease) both;
+}
+
+.screen.wide {
+  max-width: 840px;
+}
+
+.screen.narrow {
+  max-width: 600px;
+  padding-top: var(--space-7);
+}
+
+@keyframes screenIn {
+  from {
+    opacity: 0;
+    transform: translateY(5px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html[data-platform="mac"] .window {
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+  }
+}

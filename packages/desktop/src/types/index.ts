@@ -111,9 +111,6 @@ export interface LogLine {
 /** 界面状态：在后端状态机之上叠加「等待授权」这一本地状态 */
 export type UiState = CoreState | "elevating";
 
-/** 创建房间 / 加入房间 */
-export type RoomMode = "create" | "join";
-
 export type LogFilter = "all" | "info" | "warn" | "error";
 
 /** 分段控件的一项 */
@@ -121,3 +118,34 @@ export interface SegmentedItem<T extends string> {
   key: T;
   label: string;
 }
+
+/** 统一的界面状态机：所有「现在是什么状态」都由它给出，组件不再自己拼。 */
+export type Phase =
+  | "unconfigured"
+  | "idle"
+  | "connecting"
+  | "connected"
+  | "disconnected"
+  | "error";
+
+/** 连接中的子状态：等解析 / 等授权 / 建网络 */
+export type ConnectStage = "resolving" | "authorizing" | "network" | null;
+
+/** 面向用户的错误：标题与下一步用中文说清楚，技术细节单独折叠。 */
+export interface UiError {
+  title: string;
+  detail: string;
+  technical: string;
+}
+
+/** 导航目的地：两个，不再有第四个 Tab */
+export type ViewKey = "room" | "settings";
+
+/** 房间页内部的两种入口 */
+export type RoomScreen = "create" | "join";
+
+/** 平台标识：只用于样式隔离 */
+export type Platform = "mac" | "win";
+
+/** 状态胶囊的语气 */
+export type Tone = "idle" | "ok" | "warn" | "danger";

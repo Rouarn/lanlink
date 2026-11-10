@@ -1,37 +1,34 @@
-import type { LogFilter, RoomRole, RoomKind, SegmentedItem, UiState } from "../types";
-
-export const stateLabel: Record<UiState, string> = {
-  idle: "未连接",
-  connecting: "连接中",
-  connected: "已连接",
-  reconnecting: "重连中",
-  failed: "连接失败",
-  elevating: "等待授权",
-};
+import type { RoomKind, RoomRegistration, RoomRole } from "../types";
 
 export const roleLabel: Record<RoomRole, string> = {
-  host: "你创建的房间",
-  member: "已加入",
+  host: "房主",
+  member: "成员",
 };
 
 export const kindLabel: Record<RoomKind, string> = {
   short: "短码",
-  long: "完整码（自包含）",
+  long: "完整码",
 };
 
-/** 中继地址允许的协议前缀，与服务端校验保持一致 */
-export const RELAY_SCHEMES = ["tcp://", "udp://", "ws://", "wss://", "quic://", "wg://"];
+export const registrationLabel: Record<RoomRegistration, string> = {
+  ok: "短码已注册",
+  failed: "短码未注册",
+  skipped: "未走解析服务",
+};
 
-export const logFilters: SegmentedItem<LogFilter>[] = [
-  { key: "all", label: "全部" },
-  { key: "info", label: "信息" },
-  { key: "warn", label: "警告" },
-  { key: "error", label: "错误" },
-];
-
-/** 对端连接方式文案 */
+/** 对端线路：p2p / direct 视为直连，其余按中继展示 */
 export function costLabel(cost: string): string {
-  if (cost === "p2p") return "直连";
-  if (cost === "relay") return "中继";
-  return cost || "—";
+  const value = cost.toLowerCase();
+  return value.includes("p2p") || value.includes("direct") ? "直连" : "经中继";
+}
+
+export function isDirect(cost: string): boolean {
+  const value = cost.toLowerCase();
+  return value.includes("p2p") || value.includes("direct");
+}
+
+/** 房间码过长时中间省略，保留可辨认的头尾 */
+export function shortCode(code: string, max = 22): string {
+  if (code.length <= max) return code;
+  return `${code.slice(0, max - 8)}…${code.slice(-7)}`;
 }
