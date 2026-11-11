@@ -41,7 +41,26 @@ fn pid_path() -> PathBuf {
     }
 }
 
+/// Android 由系统保证一个应用只有一个界面进程，且应用沙箱里没有可共享的 `/tmp`：
+/// 这里直接放行，避免桌面端的 flock 逻辑在移动端走歪。
+#[cfg(target_os = "android")]
+pub fn acquire() -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(target_os = "android")]
+pub fn release() {}
+
+#[cfg(target_os = "android")]
+pub fn wait_for_successor(
+    _timeout: Duration,
+    _canceled: &std::sync::atomic::AtomicBool,
+) -> Option<u32> {
+    None
+}
+
 /// 拿到实例锁；已被别的进程持有时返回错误。
+#[cfg(not(target_os = "android"))]
 pub fn acquire() -> Result<(), String> {
     let path = lock_path();
 
@@ -88,6 +107,7 @@ pub fn acquire() -> Result<(), String> {
 }
 
 /// 交出实例锁（提权前调用，否则管理员实例会把自己当成第二个实例而退出）。
+#[cfg(not(target_os = "android"))]
 pub fn release() {
     if let Some(file) = LOCK.lock().unwrap().take() {
         #[cfg(unix)]
@@ -101,6 +121,7 @@ pub fn release() {
 /// 等管理员实例接管：pid 文件里出现另一个存活进程时返回它的 pid。
 ///
 /// `canceled` 为真（授权被取消）时立刻放弃等待。
+#[cfg(not(target_os = "android"))]
 pub fn wait_for_successor(
     timeout: Duration,
     canceled: &std::sync::atomic::AtomicBool,

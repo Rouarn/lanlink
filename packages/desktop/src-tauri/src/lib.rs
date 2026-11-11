@@ -1,5 +1,9 @@
 mod broadcast;
 mod config;
+#[cfg(not(target_os = "android"))]
+mod core;
+#[cfg(target_os = "android")]
+#[path = "core_android.rs"]
 mod core;
 mod elevate;
 mod games;
@@ -9,6 +13,8 @@ mod proc;
 mod rooms;
 mod settings;
 mod single;
+#[cfg(target_os = "android")]
+mod android;
 #[cfg(windows)]
 mod win_task;
 
@@ -654,7 +660,12 @@ pub fn run() {
         .find(|pair| pair[0] == "--room")
         .map(|pair| pair[1].clone());
 
-    let app = tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    // Android 端没有独立进程：VPN 授权与网卡由系统 VpnService 承担。
+    #[cfg(target_os = "android")]
+    let builder = builder.plugin(tauri_plugin_vpnservice::init());
+
+    let app = builder
         .manage(AppState {
             tunnel: Arc::new(Mutex::new(Tunnel::new())),
         })
@@ -688,6 +699,12 @@ pub fn run() {
             }
         })
         .setup(move |app| {
+            // Android：VPN 插件需要 AppHandle，注入给 Tunnel 才能建卡并取 fd
+            #[cfg(target_os = "android")]
+            {
+                let state = app.state::<AppState>();
+                state.tunnel.lock().unwrap().set_app(app.handle().clone());
+            }
             // 提权实例由系统授权进程拉起，窗口可能落在别的窗口后面（被遮挡时 WebView 不绘制），
             // 这里主动激活一次，保证交接后用户立刻看到界面
             if elevated_run {

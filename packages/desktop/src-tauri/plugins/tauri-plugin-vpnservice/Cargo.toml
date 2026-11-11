@@ -1,0 +1,14 @@
+[package]
+name = "tauri-plugin-vpnservice"
+version = "0.1.0"
+description = "LanLink 使用的 Android VpnService 桥（派生自 EasyTier 的 tauri-plugin-vpnservice，LGPL-3.0）"
+edition = "2021"
+links = "tauri-plugin-vpnservice"
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+
+[build-dependencies]
+tauri-plugin = { version = "2", features = ["build"] }

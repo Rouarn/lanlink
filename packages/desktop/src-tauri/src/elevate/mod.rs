@@ -5,6 +5,15 @@
 //! 然后当前实例退出，由管理员实例接管并自动连接。
 //! macOS 用 `AuthorizationExecuteWithPrivileges`，Windows 用 `ShellExecuteExW` + `runas`。
 
+/// Android 应用本身就在独立沙箱里运行，组网不需要（也没有）root：
+/// 虚拟网卡靠系统 VpnService 授权，因此这里恒为「已提权」，
+/// 避免走桌面端的「管理员重开」分支。
+#[cfg(target_os = "android")]
+pub fn is_elevated() -> bool {
+    true
+}
+
+#[cfg(not(target_os = "android"))]
 pub fn is_elevated() -> bool {
     #[cfg(unix)]
     {

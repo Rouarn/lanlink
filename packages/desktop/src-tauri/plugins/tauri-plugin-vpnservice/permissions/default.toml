@@ -1,0 +1,9 @@
+[default]
+description = "Default permissions for the plugin"
+permissions = [
+    "allow-prepare-vpn",
+    "allow-start-vpn",
+    "allow-stop-vpn",
+    "allow-get-vpn-status",
+    "allow-take-tun-fd",
+]

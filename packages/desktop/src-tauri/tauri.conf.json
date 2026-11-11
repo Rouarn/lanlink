@@ -41,9 +41,7 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "resources": {
-      "../../core": "core"
-    },
+    "resources": {},
     "macOS": {
       "minimumSystemVersion": "11.0",
       "signingIdentity": "-"

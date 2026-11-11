@@ -204,6 +204,18 @@ pub struct BroadcastRelay {
 }
 
 impl BroadcastRelay {
+    /// Android 的组播/广播需要 `MulticastLock` 且多数 ROM 会拦截，明确禁用而不是
+    /// 让它带着错误的假设跑起来（界面会显示这条原因）。
+    #[cfg(target_os = "android")]
+    pub fn start(
+        _ports: &[u16],
+        _log: PathBuf,
+        _peers: Arc<Mutex<Vec<Ipv4Addr>>>,
+    ) -> Result<Self, String> {
+        Err("Android 暂不支持 UDP 广播转发".to_string())
+    }
+
+    #[cfg(not(target_os = "android"))]
     pub fn start(
         ports: &[u16],
         log: PathBuf,

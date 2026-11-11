@@ -15,6 +15,13 @@ target/
 # Tauri 生成物
 packages/desktop/src-tauri/gen/
 
+# Android 插件本地构建产物与 Tauri 复制进来的 api 源码
+packages/desktop/src-tauri/plugins/*/android/build/
+packages/desktop/src-tauri/plugins/*/android/.tauri/
+
+# Python 缓存（图标处理等一次性脚本）
+__pycache__/
+
 # 临时分享包与本地预览
 .trae-html-share-packages/
 
@@ -24,6 +31,10 @@ packages/core/**/easytier-core
 packages/core/**/easytier-core.exe
 packages/core/**/easytier-cli
 packages/core/**/easytier-cli.exe
+
+# EasyTier 源码与它引用的 GitHub 依赖（由 scripts/fetch-easytier.sh 拉取，约 60MB）
+.easytier/
+.easytier-deps/
 
 # Go 查码服务产物
 packages/server/dist/

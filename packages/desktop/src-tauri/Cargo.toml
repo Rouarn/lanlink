@@ -33,6 +33,9 @@ security-framework-sys = "2.9.0"
 
 [target.'cfg(target_os = "android")'.dependencies]
 libc = "0.2"
+# Android 端用动态库方式接 EasyTier：不静态链进 liblanlink_lib.so。
+libloading = "0.8"
+tauri-plugin-vpnservice = { path = "plugins/tauri-plugin-vpnservice" }
 
 [target.'cfg(windows)'.dependencies]
 # 提权：OpenProcessToken/GetTokenInformation 判断管理员，ShellExecuteExW + runas 重开自身
