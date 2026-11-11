@@ -53,31 +53,33 @@ async function copyIp(ip: string): Promise<void> {
         <span class="chip">你</span>
       </li>
 
-      <li v-for="peer in peers" :key="peer.hostname + peer.ipv4" class="peer-row">
-        <span class="avatar">{{ displayName(peer.hostname).slice(0, 1).toUpperCase() }}</span>
-        <span class="peer-main">
-          <span class="peer-name" :class="{ unnamed: !peer.hostname?.trim() }">
-            {{ displayName(peer.hostname) }}
+      <TransitionGroup name="peer">
+        <li v-for="peer in peers" :key="peer.hostname + peer.ipv4" class="peer-row">
+          <span class="avatar">{{ displayName(peer.hostname).slice(0, 1).toUpperCase() }}</span>
+          <span class="peer-main">
+            <span class="peer-name" :class="{ unnamed: !peer.hostname?.trim() }">
+              {{ displayName(peer.hostname) }}
+            </span>
+            <span class="peer-ip mono">{{ peer.ipv4 || "—" }}</span>
           </span>
-          <span class="peer-ip mono">{{ peer.ipv4 || "—" }}</span>
-        </span>
-        <span class="chip" :class="isDirect(peer.cost) ? 'chip-ok' : 'chip-relay'">
-          {{ costLabel(peer.cost) }}
-        </span>
-        <button
-          type="button"
-          class="icon-btn"
-          :aria-label="`复制 ${displayName(peer.hostname)} 的 IP`"
-          @click="copyIp(peer.ipv4)"
-        >
-          <AppIcon :name="copiedIp === peer.ipv4 ? 'check' : 'copy'" :size="14" />
-        </button>
+          <span class="chip" :class="isDirect(peer.cost) ? 'chip-ok' : 'chip-relay'">
+            {{ costLabel(peer.cost) }}
+          </span>
+          <button
+            type="button"
+            class="icon-btn"
+            :aria-label="`复制 ${displayName(peer.hostname)} 的 IP`"
+            @click="copyIp(peer.ipv4)"
+          >
+            <AppIcon :name="copiedIp === peer.ipv4 ? 'check' : 'copy'" :size="14" />
+          </button>
+        </li>
+      </TransitionGroup>
+
+      <li v-if="!peers.length" class="peer-empty">
+        房间里现在只有你。朋友连上后会自动出现在这里；如果对方已经进来却看不到，稍等几秒或查看活动日志。
       </li>
     </ul>
-
-    <p v-if="!peers.length" class="empty">
-      还没看到别人。把房间码发出去，朋友进来后会出现在这里。
-    </p>
   </section>
 </template>
 
@@ -100,7 +102,33 @@ async function copyIp(ip: string): Promise<void> {
   display: flex;
   align-items: center;
   gap: 10px;
+  min-height: 44px;
   padding: 8px 0;
+}
+
+/* 右侧标签与复制按钮不参与收缩，只让中间的名字与 IP 截断 */
+.peer-row > .chip,
+.peer-row > .icon-btn {
+  flex: none;
+}
+
+/* 空态与一行对端同高，数据从无到有时不跳高度 */
+.peer-empty {
+  display: flex;
+  align-items: center;
+  min-height: 44px;
+  padding: 8px 0;
+  font-size: var(--text-sm);
+  line-height: 1.6;
+  color: var(--text-3);
+}
+
+.peer-enter-active {
+  transition: opacity var(--dur-base) var(--ease);
+}
+
+.peer-enter-from {
+  opacity: 0;
 }
 
 .peer-row + .peer-row {
@@ -138,6 +166,9 @@ async function copyIp(ip: string): Promise<void> {
 }
 
 .peer-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-size: var(--text-base);
   font-weight: 600;
 }
@@ -147,6 +178,9 @@ async function copyIp(ip: string): Promise<void> {
 }
 
 .peer-ip {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-size: var(--text-xs);
   color: var(--text-3);
 }

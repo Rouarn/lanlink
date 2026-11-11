@@ -16,6 +16,7 @@ const { toastText } = useApp();
   left: 50%;
   bottom: 22px;
   z-index: 60;
+  max-width: calc(100vw - 32px);
   transform: translateX(-50%);
   padding: 8px 14px;
   border: 1px solid var(--border);
@@ -24,8 +25,14 @@ const { toastText } = useApp();
   box-shadow: 0 12px 30px -12px rgba(var(--shadow-rgb), 0.45);
   font-size: var(--text-sm);
   font-weight: 600;
+  line-height: 1.5;
   color: var(--text);
-  white-space: nowrap;
+  text-align: center;
+  white-space: normal;
+}
+
+:global(html[data-platform="android"] .toast) {
+  bottom: calc(22px + var(--safe-bottom));
 }
 
 .toast-enter-active,

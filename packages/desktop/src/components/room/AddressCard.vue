@@ -60,11 +60,15 @@ async function copyIp(): Promise<void> {
 .address-row {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 14px;
+  row-gap: 8px;
   margin: 6px 0 8px;
 }
 
 .ip {
+  min-width: 0;
+  overflow-wrap: anywhere;
   font-size: 25px;
   font-weight: 600;
   letter-spacing: -0.01em;
@@ -73,6 +77,7 @@ async function copyIp(): Promise<void> {
 
 .address-hint {
   margin: 0;
+  overflow-wrap: anywhere;
   font-size: var(--text-sm);
   line-height: 1.6;
   color: var(--text-3);

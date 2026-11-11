@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onBeforeUnmount, watch } from "vue";
+import { nextTick, onBeforeUnmount, ref, watch } from "vue";
 import { useApp } from "../../stores/app";
 import { useLogs } from "../../stores/logs";
 import type { LogFilter } from "../../types";
@@ -17,6 +17,7 @@ const filters: Array<{ key: LogFilter; label: string }> = [
 ];
 
 let timer: number | undefined;
+const bodyRef = ref<HTMLElement | null>(null);
 
 function stop(): void {
   window.clearInterval(timer);
@@ -27,13 +28,38 @@ function onKey(event: KeyboardEvent): void {
   if (event.key === "Escape") closeDrawer();
 }
 
+function atBottom(el: HTMLElement): boolean {
+  return el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+}
+
+/**
+ * 日志按时间正序渲染，最新一条在底部。
+ * 打开抽屉、或用户原本就贴着底部时，刷新后继续贴底；用户上翻查看历史时不打断。
+ */
+async function load(initial = false): Promise<void> {
+  const el = bodyRef.value;
+  const stick = initial || !el || atBottom(el);
+  await refresh();
+  if (!stick) return;
+  await nextTick();
+  const node = bodyRef.value;
+  if (node) node.scrollTop = node.scrollHeight;
+}
+
+async function setLevel(next: LogFilter): Promise<void> {
+  level.value = next;
+  await nextTick();
+  const node = bodyRef.value;
+  if (node) node.scrollTop = node.scrollHeight;
+}
+
 watch(drawerOpen, async (open) => {
   stop();
   window.removeEventListener("keydown", onKey);
   if (open) {
     window.addEventListener("keydown", onKey);
-    await refresh();
-    timer = window.setInterval(refresh, 3000);
+    await load(true);
+    timer = window.setInterval(() => void load(), 3000);
   }
 });
 
@@ -72,14 +98,14 @@ onBeforeUnmount(() => {
             type="button"
             class="seg-item"
             :class="{ active: level === item.key }"
-            @click="level = item.key"
+            @click="setLevel(item.key)"
           >
             {{ item.label }}
             <span class="count">{{ counts[item.key] }}</span>
           </button>
         </div>
 
-        <div class="drawer-body">
+        <div ref="bodyRef" class="drawer-body">
           <LogList :lines="filtered" />
         </div>
 
@@ -126,7 +152,12 @@ onBeforeUnmount(() => {
 }
 
 .drawer-head h2 {
+  flex: 1;
+  min-width: 0;
   margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-size: var(--text-base);
   font-weight: 650;
 }
@@ -138,6 +169,7 @@ onBeforeUnmount(() => {
 .drawer-actions {
   display: flex;
   align-items: center;
+  flex: none;
   gap: 2px;
   margin-left: auto;
 }
@@ -160,7 +192,16 @@ onBeforeUnmount(() => {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
   padding: 4px 16px 12px;
+}
+
+/* 手机端让出状态栏、横屏刘海与手势条 */
+:global(html[data-platform="android"] .drawer) {
+  padding-top: var(--safe-top);
+  padding-right: var(--safe-right);
+  padding-bottom: var(--safe-bottom);
 }
 
 .drawer-foot {

@@ -5,11 +5,19 @@ import { useConnection } from "../../stores/connection";
 import { useRooms } from "../../stores/rooms";
 import AppIcon from "../../components/ui/AppIcon.vue";
 
-const { openDrawer } = useApp();
+const { openDrawer, platform } = useApp();
 const { stage, cancel } = useConnection();
 const { room, preview } = useRooms();
 
 const name = computed(() => room.value?.name || preview.value?.name || "房间");
+const isAndroid = computed(() => platform.value === "android");
+
+const authLabel = computed(() => (isAndroid.value ? "授权虚拟网卡" : "检查运行权限"));
+const lede = computed(() =>
+  isAndroid.value
+    ? "通常几秒钟就好。第一次连接时系统会弹一次 VPN 授权，请选择允许。"
+    : "通常几秒钟就好。第一次连接可能会问一次管理员权限。",
+);
 
 const steps = computed(() => {
   const current = stage.value;
@@ -17,7 +25,7 @@ const steps = computed(() => {
     { key: "resolve", label: "确认房间配置", state: current === "resolving" ? "active" : "done" },
     {
       key: "auth",
-      label: "检查运行权限",
+      label: authLabel.value,
       state:
         current === "authorizing" ? "active" : current === "network" ? "done" : "todo",
     },
@@ -38,7 +46,7 @@ async function abort(): Promise<void> {
   <section class="screen narrow connecting">
     <div class="pulse" aria-hidden="true"><span class="spinner" /></div>
     <h1>正在连接「{{ name }}」</h1>
-    <p class="lede center">通常几秒钟就好。第一次连接可能会问一次管理员权限。</p>
+    <p class="lede center">{{ lede }}</p>
 
     <ol class="steps">
       <li v-for="step in steps" :key="step.key" class="step" :class="step.state">
@@ -83,6 +91,7 @@ async function abort(): Promise<void> {
 
 h1 {
   margin: 0 0 6px;
+  overflow-wrap: anywhere;
   font-size: var(--text-title);
   font-weight: 640;
   letter-spacing: -0.012em;

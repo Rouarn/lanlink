@@ -111,12 +111,13 @@ async function remove(target: number): Promise<void> {
 
 .manual-add {
   display: flex;
+  flex-wrap: wrap;
   gap: 6px;
   margin-top: 8px;
 }
 
 .manual-add .input {
-  flex: 1;
+  flex: 1 1 120px;
   min-width: 0;
 }
 

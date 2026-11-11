@@ -120,10 +120,21 @@ async function leave(): Promise<void> {
   margin-bottom: 16px;
 }
 
+.room-head-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.room-head > .btn {
+  flex: none;
+}
+
 .conn-line {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 7px;
+  row-gap: 2px;
   margin-bottom: 4px;
   font-size: var(--text-sm);
   font-weight: 600;
@@ -138,6 +149,9 @@ async function leave(): Promise<void> {
 
 h1 {
   margin: 0 0 7px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-size: var(--text-title);
   font-weight: 660;
   letter-spacing: -0.012em;
@@ -148,12 +162,15 @@ h1 {
   align-items: center;
   flex-wrap: wrap;
   gap: 7px;
+  row-gap: 6px;
 }
 
 .code-chip {
   display: inline-flex;
   align-items: center;
   gap: 6px;
+  min-width: 0;
+  max-width: 100%;
   height: 24px;
   padding: 0 8px;
   border: 1px solid var(--border);
@@ -184,8 +201,10 @@ h1 {
 .room-foot {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   justify-content: space-between;
   gap: 12px;
+  row-gap: 6px;
   margin-top: 6px;
   padding: 0 4px;
   font-size: var(--text-xs);

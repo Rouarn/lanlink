@@ -172,7 +172,7 @@ export type ViewKey = "room" | "settings";
 export type RoomScreen = "create" | "join";
 
 /** 平台标识：只用于样式隔离 */
-export type Platform = "mac" | "win";
+export type Platform = "mac" | "win" | "android";
 
 /** 状态胶囊的语气 */
 export type Tone = "idle" | "ok" | "warn" | "danger";

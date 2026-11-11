@@ -65,4 +65,10 @@ function levelClass(level: string): string {
   color: var(--text-2);
   word-break: break-word;
 }
+
+/* 窄屏抽屉里给正文多留一点宽度 */
+:global(html[data-platform="android"] .log-row) {
+  grid-template-columns: 52px 40px minmax(0, 1fr);
+  gap: 6px;
+}
 </style>

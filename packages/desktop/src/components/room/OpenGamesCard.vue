@@ -73,7 +73,7 @@ async function copy(game: OpenGame): Promise<void> {
           :aria-label="`复制 ${endpoint(game)}`"
           @click="copy(game)"
         >
-          {{ endpoint(game) }}
+          <span class="endpoint-text">{{ endpoint(game) }}</span>
           <AppIcon :name="copied === endpoint(game) ? 'check' : 'copy'" :size="13" />
         </button>
       </li>
@@ -171,6 +171,8 @@ async function copy(game: OpenGame): Promise<void> {
   align-items: center;
   gap: 5px;
   flex: none;
+  min-width: 0;
+  max-width: 65%;
   height: 26px;
   padding: 0 8px;
   border: 1px solid var(--border);
@@ -178,6 +180,17 @@ async function copy(game: OpenGame): Promise<void> {
   background: var(--surface);
   font-size: var(--text-xs);
   color: var(--text-2);
+}
+
+.endpoint-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.endpoint .icon {
+  flex: none;
 }
 
 .endpoint:hover {

@@ -59,7 +59,9 @@
 .card-head {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: var(--space-3);
+  row-gap: var(--space-2);
   margin-bottom: var(--space-6);
   color: var(--text-2);
 }
@@ -478,8 +480,10 @@
 .kv {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   justify-content: space-between;
   gap: var(--space-5);
+  row-gap: 2px;
   padding: var(--space-3) 0;
   font-size: 12px;
 }
@@ -489,8 +493,10 @@
 }
 
 .kv > span:last-child {
+  min-width: 0;
   color: var(--text-2);
   text-align: right;
+  overflow-wrap: anywhere;
 }
 
 /* 状态条与支持项 */

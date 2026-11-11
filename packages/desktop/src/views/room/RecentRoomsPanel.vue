@@ -125,21 +125,25 @@ async function confirmClear(): Promise<void> {
 }
 
 .recent-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-size: var(--text-base);
   font-weight: 600;
 }
 
 .recent-meta {
-  font-size: var(--text-xs);
-  color: var(--text-3);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  font-size: var(--text-xs);
+  color: var(--text-3);
 }
 
 .recent-actions {
   display: flex;
   align-items: center;
+  flex: none;
   gap: 2px;
   margin-left: auto;
 }

@@ -60,11 +60,15 @@ const { view, go, goRoom, openDrawer } = useApp();
   display: flex;
   align-items: center;
   gap: 8px;
-  flex: none;
+  flex: 0 1 auto;
+  min-width: 0;
   color: var(--text);
 }
 
 .brand-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-size: var(--text-brand);
   font-weight: 680;
   letter-spacing: -0.01em;
@@ -73,6 +77,7 @@ const { view, go, goRoom, openDrawer } = useApp();
 .nav {
   display: flex;
   align-items: center;
+  flex: none;
   gap: 2px;
 }
 
@@ -101,6 +106,7 @@ const { view, go, goRoom, openDrawer } = useApp();
 .appbar-end {
   display: flex;
   align-items: center;
+  flex: none;
   gap: 8px;
   margin-left: auto;
 }

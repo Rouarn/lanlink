@@ -75,8 +75,9 @@ async function remove(port: number): Promise<void> {
       {{ note }}
     </div>
 
-    <p v-if="issue" class="field-hint" :class="issue.level">
-      <template v-if="issue.level === 'warn'">
+    <p v-if="issue" class="field-hint" :class="issue.level === 'info' ? '' : issue.level">
+      <template v-if="issue.level === 'info'">{{ issue.message }}</template>
+      <template v-else-if="issue.level === 'warn'">
         部分功能受限：{{ issue.message }}。其余端口仍在转发。
       </template>
       <template v-else>
@@ -175,12 +176,14 @@ async function remove(port: number): Promise<void> {
 
 .port-add {
   display: flex;
+  flex-wrap: wrap;
   gap: 6px;
   margin-top: 10px;
 }
 
 .port-input {
   flex: 1;
+  min-width: 0;
   max-width: 190px;
 }
 

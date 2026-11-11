@@ -18,7 +18,8 @@ watch(joinCode, (value) => {
 });
 
 onMounted(() => {
-  codeInput.value?.focus();
+  // 安卓上自动聚焦会立刻弹出键盘，把整页顶起来；让用户自己点输入框。
+  if (platform.value !== "android") codeInput.value?.focus();
 });
 </script>
 

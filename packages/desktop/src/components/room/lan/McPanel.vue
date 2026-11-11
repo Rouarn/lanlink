@@ -46,8 +46,9 @@ async function toggle(next: boolean): Promise<void> {
       {{ note }}
     </div>
 
-    <p v-if="issue" class="field-hint" :class="issue.level">
-      <template v-if="issue.level === 'warn'">
+    <p v-if="issue" class="field-hint" :class="issue.level === 'info' ? '' : issue.level">
+      <template v-if="issue.level === 'info'">{{ issue.message }}</template>
+      <template v-else-if="issue.level === 'warn'">
         部分功能受限：{{ issue.message }}。发现服务仍在运行，只是其中一项没起来。
       </template>
       <template v-else>

@@ -12,9 +12,12 @@ const drawerOpen = ref(false);
 const toastText = ref("");
 let toastTimer: number | undefined;
 
-export const platform = computed<Platform>(() =>
-  info.value?.platform === "windows" ? "win" : "mac",
-);
+export const platform = computed<Platform>(() => {
+  const raw = info.value?.platform;
+  if (raw === "windows") return "win";
+  if (raw === "android") return "android";
+  return "mac";
+});
 
 /** 只在有 AppInfo 之后调用一次：设置 data-platform 供样式隔离 */
 async function loadInfo(): Promise<void> {

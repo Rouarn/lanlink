@@ -49,6 +49,48 @@ html[data-platform="windows"] .appbar {
   background: var(--window-bg);
 }
 
+/* Android：系统栏会压住 WebView（edge-to-edge），窗口无边框，
+   由外壳自己让出状态栏、挖孔与手势条的安全区；窄屏下收紧内边距与导航间距。 */
+html[data-platform="android"] {
+  /* 安全区真实值由 env() 给出；部分 WebView 返回 0，用兜底值避免顶栏压字 */
+  --safe-top: max(env(safe-area-inset-top, 0px), 24px);
+  --safe-bottom: max(env(safe-area-inset-bottom, 0px), 12px);
+  --safe-left: env(safe-area-inset-left, 0px);
+  --safe-right: env(safe-area-inset-right, 0px);
+}
+
+html[data-platform="android"] .window {
+  border: 0;
+  border-radius: 0;
+  /* 移动端用动态视口高度，键盘弹出/地址栏收起时不留空白 */
+  height: 100dvh;
+}
+
+html[data-platform="android"] .appbar {
+  /* 内容固定 52px，安全区叠加在高度与内边距上：顶栏不会被状态栏挤扁 */
+  height: calc(52px + var(--safe-top));
+  padding: var(--safe-top) max(12px, var(--safe-right)) 0 max(12px, var(--safe-left));
+  gap: 10px;
+  background: var(--window-bg);
+}
+
+/* 顶栏放不下「状态胶囊 + IP」，窄屏上只保留活动日志按钮，状态在房间页看 */
+html[data-platform="android"] .status-pill {
+  display: none;
+}
+
+/* 窄屏下导航不换行、不被挤压 */
+html[data-platform="android"] .nav,
+html[data-platform="android"] .nav-item {
+  flex: none;
+  white-space: nowrap;
+}
+
+html[data-platform="android"] .nav-item {
+  padding: 0 9px;
+  font-size: 13px;
+}
+
 .content {
   flex: 1;
   min-height: 0;
@@ -58,6 +100,67 @@ html[data-platform="windows"] .appbar {
   background: var(--glass-content);
   scrollbar-width: thin;
   scrollbar-color: var(--border-strong) transparent;
+}
+
+html[data-platform="android"] .content {
+  padding: 16px max(16px, var(--safe-right)) calc(20px + var(--safe-bottom))
+    max(16px, var(--safe-left));
+  background: var(--window-bg);
+}
+
+/* 窄屏收紧卡片，主要交互元素补足命中区；桌面端不受影响 */
+html[data-platform="android"] .card {
+  padding: 14px;
+}
+
+html[data-platform="android"] .screen.narrow {
+  padding-top: 8px;
+}
+
+html[data-platform="android"] .connecting,
+html[data-platform="android"] .failed {
+  padding-top: 24px;
+}
+
+html[data-platform="android"] .btn {
+  min-height: 38px;
+}
+
+html[data-platform="android"] .btn-sm {
+  min-height: 32px;
+}
+
+html[data-platform="android"] .icon-btn {
+  width: 36px;
+  height: 36px;
+}
+
+html[data-platform="android"] .nav-item {
+  height: 34px;
+}
+
+html[data-platform="android"] .seg-item {
+  height: 34px;
+}
+
+html[data-platform="android"] .recent-toggle {
+  height: 36px;
+}
+
+/* 开关外观不变，用伪元素把命中区扩大到 44×38 */
+html[data-platform="android"] .switch::before {
+  content: "";
+  position: absolute;
+  inset: -8px;
+}
+
+/* 模态遮罩让出上下安全区，弹窗在状态栏与手势条之间 */
+html[data-platform="android"] .modal-scrim {
+  padding: calc(12px + var(--safe-top)) 12px calc(12px + var(--safe-bottom));
+}
+
+html[data-platform="android"] .modal-scrim .dialog {
+  max-height: calc(100dvh - var(--safe-top) - var(--safe-bottom) - 24px);
 }
 
 html[data-platform="windows"] .content {

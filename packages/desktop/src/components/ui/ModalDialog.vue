@@ -23,7 +23,7 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onKey));
 
 <template>
   <Teleport to="body">
-    <div v-if="open" class="scrim" @click.self="open = false">
+    <div v-if="open" class="scrim modal-scrim" @click.self="open = false">
       <section
         class="dialog"
         role="dialog"
@@ -50,6 +50,8 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onKey));
   inset: 0;
   z-index: 40;
   display: grid;
+  /* 定宽弹窗在窄屏靠 100% 收缩；列必须是 minmax(0,1fr)，否则 auto 列会被内容撑开 */
+  grid-template-columns: minmax(0, 1fr);
   place-items: center;
   padding: 32px;
   background: var(--scrim);
@@ -85,14 +87,18 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onKey));
 }
 
 .dialog-body {
+  min-height: 0;
   padding: 4px 18px 16px;
   overflow-y: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
   font-size: var(--text-base);
   color: var(--text-2);
 }
 
 .dialog-foot {
   display: flex;
+  flex-wrap: wrap;
   justify-content: flex-end;
   gap: 8px;
   padding: 12px 18px 16px;

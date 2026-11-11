@@ -12,6 +12,7 @@ const elev = ref<ElevationInfo | null>(null);
 
 const elevated = computed(() => elev.value?.elevated ?? info.value?.elevated ?? false);
 const isWindows = computed(() => platform.value === "win");
+const isAndroid = computed(() => platform.value === "android");
 const silent = computed(() => elev.value?.silent ?? false);
 
 async function refresh(): Promise<void> {
@@ -40,19 +41,30 @@ onMounted(refresh);
       <AppIcon name="shield" />
       <h2>运行权限</h2>
       <span class="chip push" :class="elevated ? 'chip-ok' : ''">
-        {{ elevated ? "管理员" : "普通用户" }}
+        {{ isAndroid ? "系统授权" : elevated ? "管理员" : "普通用户" }}
       </span>
     </header>
 
     <div class="status-line">
       <span class="dot" :class="elevated ? 'ok' : 'idle'" />
-      <template v-if="isWindows">
+      <template v-if="isAndroid">
+        虚拟网卡由系统 VPN 授权创建：连接时如未授权会弹窗，点「允许」即可，不需要 Root。
+      </template>
+      <template v-else-if="isWindows">
         {{ elevated ? "已以管理员身份运行，虚拟网卡正常。" : "还没有管理员权限，连接时会再申请一次。" }}
       </template>
       <template v-else>
         {{ elevated ? "已获得管理员权限，可以创建虚拟网卡。" : "当前是普通用户权限，连接时会弹一次授权。" }}
       </template>
     </div>
+
+    <template v-if="isAndroid">
+      <div class="mac-note">
+        <p>
+          第一次连接会弹出系统 VPN 授权，点「允许」后虚拟网卡才会建立；误点拒绝可以重新连接，再在弹窗中允许。
+        </p>
+      </div>
+    </template>
 
     <template v-if="isWindows">
       <div class="elev-row">
@@ -68,7 +80,7 @@ onMounted(refresh);
       </div>
     </template>
 
-    <div v-else class="mac-note">
+    <div v-else-if="!isAndroid" class="mac-note">
       <p>macOS 第一次创建虚拟网卡时会弹一次系统授权，点允许就好，之后不会重复问。</p>
       <button type="button" class="btn btn-ghost btn-sm" @click="refresh">
         <AppIcon name="refresh" :size="14" />
