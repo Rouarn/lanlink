@@ -36,9 +36,10 @@ packages/core/**/easytier-core.exe
 packages/core/**/easytier-cli
 packages/core/**/easytier-cli.exe
 
-# EasyTier 源码与它引用的 GitHub 依赖（由 scripts/fetch-easytier.sh 拉取，约 60MB）
-.easytier/
-.easytier-deps/
+# EasyTier 源码与它引用的 GitHub 依赖：安卓构建缓存，
+# 由 scripts/fetch-easytier.sh 拉到 packages/mobile/ 下，约 38MB
+packages/mobile/.src/
+packages/mobile/.deps/
 
 # Go 查码服务产物
 packages/server/dist/

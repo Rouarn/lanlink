@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
 # 拉取 Android 端构建所需的 EasyTier 源码与它引用的 GitHub 依赖。
 #
-# 产物（均被 .gitignore 忽略，不入库）：
-#   .easytier/       EasyTier 源码（固定 commit）
-#   .easytier-deps/  EasyTier 用 git 引用的 5 个依赖（本机 GitHub git 协议不可达，
-#                    统一换成 codeload 压缩包 + Cargo [patch] 指向本地目录）
+# 产物（构建缓存，均被 .gitignore 忽略，不入库）：
+#   packages/mobile/.src/   EasyTier 源码（固定 commit）
+#   packages/mobile/.deps/  EasyTier 用 git 引用的 5 个依赖（本机 GitHub git 协议不可达，
+#                           统一换成 codeload 压缩包 + Cargo [patch] 指向本地目录）
 #
 # 用法：bash scripts/fetch-easytier.sh
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SRC_DIR="$ROOT/.easytier"
-DEPS_DIR="$ROOT/.easytier-deps"
+SRC_DIR="$ROOT/packages/mobile/.src"
+DEPS_DIR="$ROOT/packages/mobile/.deps"
 EASYTIER_REV="f07d8d198ab4b8f046d392f5a51308eca87cdde5"
 
 # codeload 直连可用（实测 ~5MB/s）；ghproxy 作为兜底。

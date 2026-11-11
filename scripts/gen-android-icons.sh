@@ -50,6 +50,9 @@ rm -f "$RES/drawable-nodpi/ic_launcher_foreground.png" \
       "$RES/drawable-nodpi/ic_launcher_background.png" \
       "$RES/drawable-nodpi/ic_launcher_monochrome.png"
 
+# 模板自带的默认图标（manifest 指向 @mipmap/ic_launcher，这两个无人引用）
+rm -f "$RES/drawable/ic_launcher_background.xml" "$RES/drawable-v24/ic_launcher_foreground.xml"
+
 # 3. 清单补 roundIcon（品牌规范要求；已存在则跳过）
 if [[ -f "$MANIFEST" ]] && ! grep -q 'android:roundIcon=' "$MANIFEST"; then
   python3 - "$MANIFEST" <<'PY'

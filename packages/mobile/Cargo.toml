@@ -13,7 +13,7 @@ crate-type = ["cdylib"]
 [dependencies]
 # 只开移动端需要的特性：TUN、management-rpc（attach_mobile_tun_fd 的前置）、
 # ring 加密后端与 DHCP（Android 虚拟网卡需要先拿到地址再建卡）。
-easytier = { path = "../../.easytier/easytier", default-features = false, features = [
+easytier = { path = ".src/easytier", default-features = false, features = [
     "tun",
     "management",
     "ring-crypto",
@@ -21,7 +21,7 @@ easytier = { path = "../../.easytier/easytier", default-features = false, featur
     "dhcp-ipv6",
     "tcp-hole-punch",
 ] }
-easytier-core = { path = "../../.easytier/easytier-core", default-features = false, features = [
+easytier-core = { path = ".src/easytier-core", default-features = false, features = [
     "ring-crypto",
     "management",
     "dhcp-ipv4",
@@ -44,24 +44,24 @@ codegen-units = 4
 panic = "abort"
 
 # 本机 github.com 的 git 协议不可达：把 EasyTier 用 git 引用的依赖换成
-# scripts/fetch-easytier.sh 下载到 .easytier-deps 的本地目录。
+# scripts/fetch-easytier.sh 下载到 .deps/ 的本地目录（与 .src/ 一样是构建缓存，不入库）。
 [patch."https://github.com/EasyTier/thunk.git"]
-thunk-rs = { path = "../../.easytier-deps/thunk/thunk-rs" }
+thunk-rs = { path = ".deps/thunk/thunk-rs" }
 
 [patch."https://github.com/EasyTier/thunk"]
-thunk-rs = { path = "../../.easytier-deps/thunk/thunk-rs" }
+thunk-rs = { path = ".deps/thunk/thunk-rs" }
 
 [patch."https://github.com/EasyTier/service-manager-rs.git"]
-service-manager = { path = "../../.easytier-deps/service-manager" }
+service-manager = { path = ".deps/service-manager" }
 
 [patch."https://github.com/EasyTier/service-manager-rs"]
-service-manager = { path = "../../.easytier-deps/service-manager" }
+service-manager = { path = ".deps/service-manager" }
 
 [patch."https://github.com/EasyTier/rust-tun"]
-tun-easytier = { path = "../../.easytier-deps/rust-tun" }
+tun-easytier = { path = ".deps/rust-tun" }
 
 [patch."https://github.com/EasyTier/kcp-sys"]
-kcp-sys = { path = "../../.easytier-deps/kcp-sys" }
+kcp-sys = { path = ".deps/kcp-sys" }
 
 [patch."https://github.com/EasyTier/tokio-websockets"]
-tokio-websockets = { path = "../../.easytier-deps/tokio-websockets" }
+tokio-websockets = { path = ".deps/tokio-websockets" }

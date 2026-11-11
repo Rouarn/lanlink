@@ -15,7 +15,8 @@ packages/desktop/          # 桌面端（Vue UI + Tauri）
 packages/shared/           # 预留（跨端共享类型/常量）
 packages/server/           # 房间码解析服务（Go，单文件，不参与 pnpm 安装）
 packages/core/<平台>/      # 内置 easytier-core / easytier-cli（打包时拷进 Resources/core）
-packages/mobile/           # 移动端占位，暂不实现
+packages/mobile/           # 安卓用的 libeasytier.so（C ABI 薄封装；.src/ 与 .deps/ 是构建缓存）
+scripts/                   # 拉取 EasyTier 源码、生成安卓图标等辅助脚本
 docs/                      # 说明文档与截图
 ```
 
