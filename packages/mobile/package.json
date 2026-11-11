@@ -1,6 +1,0 @@
-{
-  "name": "@lanlink/mobile",
-  "private": true,
-  "version": "0.1.0",
-  "description": "移动端占位，暂不实现、不安装依赖、不参与构建"
-}

@@ -25,7 +25,7 @@ docs/                      # 说明文档与截图
 
 出包只覆盖 macOS（Apple 芯片）与 Windows x64，不再提供 Intel Mac 与 Windows arm64 的产物。
 
-`pnpm-workspace.yaml` 只列举 `packages/desktop`、`packages/shared`、`packages/mobile`，
+`pnpm-workspace.yaml` 只列举 `packages/desktop`、`packages/shared`，
 不用通配符，避免把 Go 工程和二进制目录扫进 pnpm 安装。
 
 ## 环境要求
@@ -97,7 +97,8 @@ git push github v0.1.1
 - macOS 走 Ad Hoc 签名（`APPLE_SIGNING_IDENTITY="-"`，无需证书），Windows 不签名，仅供自用；
 - Windows 安装包界面为简体中文，只装文件、建快捷方式，不结束进程：早期版本可能残留的
   `core\windows-x64\WinDivert64.sys` 不会被清理，卸载后计划任务也可能残留（下次运行覆盖）；
-- Android 目前是空壳（`packages/mobile`），本次不出包；
+- Android 复用桌面前端，通过 `tauri android build` 本地出 APK（首次需先跑
+  `scripts/fetch-easytier.sh` 编出 `libeasytier.so`），CI 仍只出 macOS 与 Windows 安装包；
 - 构建好的安装包在对应 Actions 运行的 Artifacts 里，保留 14 天。
 
 ## 说明

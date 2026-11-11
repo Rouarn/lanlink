@@ -3,4 +3,3 @@
 packages:
   - "packages/desktop"
   - "packages/shared"
-  - "packages/mobile"
