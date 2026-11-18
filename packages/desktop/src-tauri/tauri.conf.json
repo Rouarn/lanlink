@@ -22,7 +22,9 @@
         "hiddenTitle": true,
         "transparent": true,
         "windowEffects": {
-          "effects": ["sidebar"],
+          "effects": [
+            "sidebar"
+          ],
           "state": "followsWindowActiveState"
         }
       }
@@ -33,7 +35,10 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["app", "dmg"],
+    "targets": [
+      "app",
+      "dmg"
+    ],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -41,14 +46,19 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "resources": {},
+    "resources": [
+      "licenses/LGPL-3.0.txt",
+      "licenses/THIRD_PARTY_NOTICES.md"
+    ],
     "macOS": {
       "minimumSystemVersion": "11.0",
       "signingIdentity": "-"
     },
     "windows": {
       "nsis": {
-        "languages": ["SimpChinese"],
+        "languages": [
+          "SimpChinese"
+        ],
         "displayLanguageSelector": false
       }
     }

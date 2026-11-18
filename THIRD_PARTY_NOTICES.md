@@ -25,3 +25,10 @@ LanLink 以**独立进程**调用 `easytier-core`（macOS / Windows），通过 
 > 本文件不是法律意见；涉及商业分发时请自行复核上游许可证要求。
 
 最后更新：2026-11-18（对应 EasyTier v2.6.4）
+
+## 安装包内的路径
+
+- macOS：`LanLink.app/Contents/Resources/licenses/`
+- Windows：`<安装目录>/licenses/`
+
+随包附带 `LGPL-3.0.txt` 与 `THIRD_PARTY_NOTICES.md`。

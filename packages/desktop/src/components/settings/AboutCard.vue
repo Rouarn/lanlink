@@ -55,6 +55,10 @@ async function copyDiagnostics(): Promise<void> {
     </div>
 
     <p class="card-foot-note">给朋友用的小工具，不上传房间数据，也不做遥测。</p>
+    <p class="card-foot-note">
+      内置 EasyTier（LGPL-3.0）；许可全文与第三方声明随安装包分发，见安装目录下的
+      <code>licenses/</code>。
+    </p>
   </section>
 </template>
 
