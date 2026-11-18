@@ -131,3 +131,14 @@ git push github v0.1.1
   Windows 从旧版本升级后首次启动会把 `%TEMP%\lanlink` 里的 `settings.json` / `rooms.json`
   一次性复制过来——只补缺失文件、不覆盖已有配置，复制失败只记日志，不影响启动。
 - 提权与单实例的细节见 `docs/privilege.md`。
+
+## 第三方组件与许可
+
+LanLink 自身以 MIT 发布；联机能力来自 [EasyTier](https://github.com/EasyTier/EasyTier)（**LGPL-3.0**），
+以独立进程方式调用，上游代码未做修改，二进制由 CI 从官方 release 下载（不入库）。
+
+- 上游项目：https://github.com/EasyTier/EasyTier
+- 上游许可证：https://github.com/EasyTier/EasyTier/blob/main/LICENSE
+- 本仓库声明：[`THIRD_PARTY_NOTICES.md`](./THIRD_PARTY_NOTICES.md)
+
+分发安装包时请随包附带 LGPL-3.0 全文与上游链接。
